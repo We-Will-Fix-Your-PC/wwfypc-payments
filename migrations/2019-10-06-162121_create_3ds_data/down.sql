@@ -1,0 +1,1 @@
+drop table threeds_datas;

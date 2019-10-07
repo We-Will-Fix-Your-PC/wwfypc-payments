@@ -9,3 +9,13 @@ create table payments (
     environment payment_environment not null default 'live',
     payment_method varchar
 );
+
+create table payment_items (
+    id uuid not null primary key,
+    payment_id uuid not null references payments(id),
+    item_type varchar not null,
+    item_data jsonb not null,
+    title varchar not null,
+    quantity int not null,
+    price money not null
+);

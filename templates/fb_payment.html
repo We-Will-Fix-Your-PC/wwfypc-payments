@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>Messenger payment</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="/static/css/payment.css' %}">
+    <link rel="stylesheet" href="/static/css/payment.css">
     <script>
         window.___gcfg = {
             lang: 'en-GB'
@@ -51,13 +51,7 @@
         window.onload = function () {
             window.gapi.load('surveyoptin');
             if (window.makePaymentForm) {
-                window.makePaymentForm(document.getElementById("payment"), "{{ payment_id }}", (payment_id, email) => {
-                    /*MessengerExtensions.requestCloseBrowser(function success() {
-                        console.log("Closing payment window");
-                    }, function error(err) {
-                        console.error(err);
-                    });*/
-
+                window.makePaymentForm(document.getElementById("payment"), "{{ payment_id }}", function (payment_id, email) {
                     window.gapi.load('surveyoptin', function () {
                         var d = new Date();
                         var data = {
@@ -83,10 +77,15 @@
                         var oldOnClose = data.onClose;
                         data.onClose = function () {
                             oldOnClose();
-                            console.log("onClose");
+
+                            MessengerExtensions.requestCloseBrowser(function success() {
+                                console.log("Closing payment window");
+                            }, function error(err) {
+                                console.error(err);
+                            });
                         }
                     });
-                }, "{{ accepts_header }}", "{{ state }}");
+                }, "{{ accepts_header | safe }}", "{{ state }}");
             }
         };
     </script>

@@ -3,14 +3,19 @@ name = "wwfypc-payments"
 version = "0.1.0"
 authors = ["Q 🦄 <q@magicalcodewit.ch>"]
 edition = "2018"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 actix-web = "1.0"
-diesel = { version = "1.4", features = ["postgres"] }
+actix-cors = "0.1"
+actix-session = "0.2"
+actix = "0.8"
+diesel = { version = "1.4", features = ["postgres", "uuid", "chrono", "serde_json"] }
 diesel-derive-enum = { version = "0.4", features = ["postgres"] }
 diesel_migrations = "1.4"
+diesel_derives = "~1.4.0"
 dotenv = "0.9.0"
 log = "0.4"
 pretty_env_logger = "0.3"
@@ -19,8 +24,15 @@ lazy_static = "1.4.0"
 reqwest = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-futures = "0.1"
+serde-hex = "0.1"
+futures-preview = { version = "0.3.0", features = ["compat"] }
 http = "0.1"
 listenfd = "0.3"
-uuid = "0.7"
+uuid = { version = "<0.7", features = ["serde", "v4"] }
 rust_decimal = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+actix-web-static-files = "0.2"
+rust-crypto = "^0.2"
+
+[build-dependencies]
+actix-web-static-files = "0.2"
