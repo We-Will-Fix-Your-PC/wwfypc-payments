@@ -1,4 +1,5 @@
 use uuid::Uuid;
+use std::fmt;
 use super::schema::{payments, payment_items, threeds_datas, card_tokens, payment_tokens};
 use chrono::prelude::*;
 use diesel::data_types::PgMoney as Pence;
@@ -15,6 +16,15 @@ pub enum PaymentState {
 pub enum PaymentEnvironment {
     TEST,
     LIVE
+}
+
+impl fmt::Display for PaymentEnvironment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PaymentEnvironment::TEST => write!(f, "Test"),
+            PaymentEnvironment::LIVE => write!(f, "Live")
+        }
+    }
 }
 
 #[derive(Queryable, Identifiable, AsChangeset, Clone, Debug, PartialEq)]

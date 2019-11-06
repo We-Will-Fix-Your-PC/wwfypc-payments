@@ -1,9 +1,8 @@
-use std::sync::Arc;
-use futures::lock::RwLock;
-use futures::prelude::*;
 use chrono::prelude::*;
-use futures::future::{ok, err, Either};
+use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
+use futures::compat::Future01CompatExt;
+use failure::Error;
 
 #[derive(Clone)]
 pub struct OAuthClientConfig {
@@ -38,20 +37,32 @@ pub struct OAuthTokenIntrospectAccess {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OAuthTokenIntrospect {
-    active: bool,
-    scope: Option<String>,
-    client_id: Option<String>,
-    username: Option<String>,
-    token_type: Option<String>,
-    exp: Option<i64>,
-    iat: Option<i64>,
-    nbf: Option<i64>,
-    sub: Option<String>,
-    aud: Option<Vec<String>>,
-    iss: Option<String>,
-    jti: Option<String>,
-    realm_access: Option<OAuthTokenIntrospectAccess>,
-    resource_access: Option<HashMap<String, OAuthTokenIntrospectAccess>>,
+    pub active: bool,
+    pub scope: Option<String>,
+    pub client_id: Option<String>,
+    pub username: Option<String>,
+    pub token_type: Option<String>,
+    pub exp: Option<i64>,
+    pub iat: Option<i64>,
+    pub nbf: Option<i64>,
+    pub sub: Option<String>,
+    pub aud: Option<Vec<String>>,
+    pub iss: Option<String>,
+    pub jti: Option<String>,
+    pub realm_access: Option<OAuthTokenIntrospectAccess>,
+    pub resource_access: Option<HashMap<String, OAuthTokenIntrospectAccess>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthIdToken {
+    sub: String,
+    name: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
+    preferred_username: Option<String>,
+    email: Option<String>,
+    email_verified: Option<bool>,
+
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,36 +72,76 @@ pub struct OAuthTokenResponse {
     expires_in: i64,
     refresh_token: Option<String>,
     refresh_expires_in: Option<i64>,
+    id_token: Option<String>,
     scopes: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthToken {
-    access_token: String,
-    expires_at: DateTime<Utc>,
-    refresh_token: Option<String>,
-    refresh_expires_at: Option<DateTime<Utc>>,
+    pub access_token: String,
+    pub expires_at: DateTime<Utc>,
+    pub refresh_token: Option<String>,
+    pub refresh_expires_at: Option<DateTime<Utc>>,
+    pub id_token: Option<String>,
 }
 
 #[derive(Serialize)]
-struct OAuthTokenGrantForm {
-    client_id: String,
-    client_secret: String,
-    grant_type: String,
+struct OAuthTokenGrantForm<'a> {
+    client_id: &'a str,
+    client_secret: &'a str,
+    grant_type: &'a str,
 }
 
 #[derive(Serialize)]
-struct OAuthTokenRefreshGrantForm {
+struct OAuthTokenRefreshGrantForm<'a> {
     #[serde(flatten)]
-    grant: OAuthTokenGrantForm,
-    refresh_token: String,
+    grant: OAuthTokenGrantForm<'a>,
+    refresh_token: &'a str,
 }
 
 #[derive(Serialize)]
-struct OAuthTokenIntrospectForm {
-    client_id: String,
-    client_secret: String,
-    token: String,
+struct OAuthTokenCodeGrantForm<'a> {
+    #[serde(flatten)]
+    grant: OAuthTokenGrantForm<'a>,
+    code: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redirect_uri: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct OAuthTokenIntrospectForm<'a> {
+    client_id: &'a str,
+    client_secret: &'a str,
+    token: &'a str,
+}
+
+#[derive(Debug, Fail)]
+pub enum VerifyTokenError {
+    #[fail(display = "internal server error")]
+    InternalServerError(String),
+    #[fail(display = "forbidden")]
+    Forbidden,
+}
+
+impl actix_web::error::ResponseError for VerifyTokenError {
+    fn error_response(&self) -> actix_web::web::HttpResponse {
+        match self {
+            VerifyTokenError::InternalServerError(c) => actix_web::web::HttpResponse::new(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
+            VerifyTokenError::Forbidden => actix_web::web::HttpResponse::new(actix_web::http::StatusCode::FORBIDDEN)
+        }
+    }
+}
+
+impl From<reqwest::Error> for VerifyTokenError {
+    fn from(error: reqwest::Error) -> VerifyTokenError {
+        VerifyTokenError::InternalServerError(format!("{}", error))
+    }
+}
+
+impl From<failure::Error> for VerifyTokenError {
+    fn from(error: failure::Error) -> VerifyTokenError {
+        VerifyTokenError::InternalServerError(format!("{}", error))
+    }
 }
 
 #[derive(Clone)]
@@ -99,6 +150,7 @@ pub struct OAuthClient {
     client: reqwest::r#async::Client,
     _well_known: Arc<RwLock<Option<OAuthWellKnown>>>,
     _access_token: Arc<RwLock<Option<OAuthToken>>>,
+    _jwks: Arc<RwLock<Option<alcoholic_jwt::JWKS>>>,
 }
 
 impl OAuthClient {
@@ -108,161 +160,330 @@ impl OAuthClient {
             client: reqwest::r#async::Client::new(),
             _well_known: Arc::new(RwLock::new(None)),
             _access_token: Arc::new(RwLock::new(None)),
+            _jwks: Arc::new(RwLock::new(None)),
         }
     }
 
-    fn well_known<'a>(self) -> impl Future<Item=OAuthWellKnown, Error=actix_web::error::Error> + 'a {
-        {
-            if let Some(well_known) = self._well_known.read().unwrap().clone() {
-                return Either::A(ok(well_known));
-            }
+    async fn well_known(&self) -> Result<OAuthWellKnown, Error> {
+        if let Some(well_known) = self._well_known.read().unwrap().clone() {
+            return Ok(well_known);
         }
 
-        Either::B(
+        let mut c = crate::util::async_reqwest_to_error(
             self.client.get(self.config.well_known_url.clone())
-                .send()
-                .and_then(|mut c| {
-                    c.json::<OAuthWellKnown>()
-                })
-                .map(move |d| {
-                    *self._well_known.write().unwrap() = Some(d.clone());
-                    d
-                })
-                .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-        )
+        ).await?;
+        let d = c.json::<OAuthWellKnown>().compat().await?;
+        *self._well_known.write().unwrap() = Some(d.clone());
+        Ok(d)
     }
 
-    pub fn get_access_token<'a>(self) -> impl Future<Item=String, Error=actix_web::Error> + 'a {
-        let client = self.client.clone();
-        let config = self.config.clone();
+    async fn jwks(&self) -> Result<alcoholic_jwt::JWKS, Error> {
+        if let Some(jwks) = self._jwks.read().unwrap().clone() {
+            return Ok(jwks);
+        }
+
+        let w = self.well_known().await?;
+        match w.jwks_uri {
+            Some(u) => {
+                let mut c = crate::util::async_reqwest_to_error(
+                    self.client.get(&u)
+                ).await?;
+                let d = c.json::<alcoholic_jwt::JWKS>().compat().await?;
+                *self._jwks.write().unwrap() = Some(d.clone());
+                Ok(d)
+            }
+            None => Err(failure::err_msg("no jwks uri"))
+        }
+    }
+
+    pub async fn authorization_url(&self, scopes: &[&str], response_type: &str, state: Option<&str>, redirect_url: Option<&str>) -> Result<String, Error> {
+        let well_known = self.well_known().await?;
+
+        let scopes = scopes.join(" ");
+        let response_type = response_type.to_string();
+
+        let mut pairs = vec![
+            ("client_id", self.config.client_id.clone()),
+            ("scope", scopes),
+            ("response_type", response_type),
+        ];
+
+        if let Some(ref redirect_url) = redirect_url {
+            pairs.push(("redirect_uri", redirect_url.to_string()));
+        }
+
+        if let Some(ref state) = state {
+            pairs.push(("state", state.to_string()));
+        }
+
+        let mut url = reqwest::Url::parse(&well_known.authorization_endpoint)?;
+
+        url.query_pairs_mut().extend_pairs(
+            pairs.iter().map(|(k, v)| { (k, &v[..]) })
+        );
+
+        Ok(url.to_string())
+    }
+
+    pub async fn token_exchange(&self, code: &str, redirect_url: Option<&str>) -> Result<OAuthToken, Error> {
+        let w = self.well_known().await?;
+
+        match w.token_endpoint {
+            Some(u) => {
+                let grant = OAuthTokenGrantForm {
+                    client_id: &self.config.client_id,
+                    client_secret: &self.config.client_secret,
+                    grant_type: "authorization_code",
+                };
+
+                let form = OAuthTokenCodeGrantForm {
+                    grant,
+                    redirect_uri: redirect_url,
+                    code,
+                };
+
+                let token = self.get_access_token().await?;
+
+                let mut c = crate::util::async_reqwest_to_error(
+                    self.client.post(&u)
+                        .bearer_auth(&token)
+                        .form(&form)
+                ).await?;
+                let t = c.json::<OAuthTokenResponse>().compat().await?;
+
+                let now = Utc::now();
+
+                Ok(OAuthToken {
+                    access_token: t.access_token.clone(),
+                    expires_at: now + chrono::Duration::seconds(t.expires_in),
+                    refresh_token: t.refresh_token.clone(),
+                    refresh_expires_at: match t.refresh_expires_in {
+                        Some(e) => Some(now + chrono::Duration::seconds(e)),
+                        None => None
+                    },
+                    id_token: t.id_token.clone(),
+                })
+            }
+            None => Err(failure::err_msg("no token endpoint"))
+        }
+    }
+
+    pub async fn get_access_token(&self) -> Result<String, Error> {
         let now = Utc::now();
 
-        {
-            if let Some(access_token) = self._access_token.clone().read().unwrap().clone() {
-                if access_token.expires_at > now {
-                    return Either::A(Either::A(ok(access_token.access_token)));
-                } else if let Some(refresh_expires_at) = access_token.refresh_expires_at {
-                    if let Some(refresh_token) = access_token.refresh_token {
-                        if refresh_expires_at > now {
-                            return Either::A(Either::B(self.clone().well_known()
-                                .and_then(move |w| {
-                                    match w.token_endpoint {
-                                        Some(e) => Either::A(match reqwest::Url::parse(&e) {
-                                            Ok(u) => {
-                                                let grant = OAuthTokenGrantForm {
-                                                    client_id: config.client_id.clone(),
-                                                    client_secret: config.client_secret.clone(),
-                                                    grant_type: "refresh_token".to_string(),
-                                                };
+        let cached_token = {
+            self._access_token.read().unwrap().clone()
+        };
+        if let Some(access_token) = cached_token {
+            if access_token.expires_at > now {
+                return Ok(access_token.access_token);
+            } else if let Some(refresh_expires_at) = access_token.refresh_expires_at {
+                if let Some(refresh_token) = access_token.refresh_token {
+                    if refresh_expires_at > now {
+                        let w = self.well_known().await?;
+                        return match w.token_endpoint {
+                            Some(u) => {
+                                let grant = OAuthTokenGrantForm {
+                                    client_id: &self.config.client_id,
+                                    client_secret: &self.config.client_secret,
+                                    grant_type: "refresh_token",
+                                };
 
-                                                let form = OAuthTokenRefreshGrantForm {
-                                                    grant,
-                                                    refresh_token,
-                                                };
+                                let form = OAuthTokenRefreshGrantForm {
+                                    grant,
+                                    refresh_token: &refresh_token,
+                                };
 
-
-                                                Either::A(
-                                                    client.post(u)
-                                                        .form(&form)
-                                                        .send()
-                                                        .and_then(|mut c| c.json::<OAuthTokenResponse>())
-                                                        .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-                                                        .map(move |t| {
-                                                            *self._access_token.write().unwrap() = Some(OAuthToken {
-                                                                access_token: t.access_token.clone(),
-                                                                expires_at: now + chrono::Duration::seconds(t.expires_in),
-                                                                refresh_token: t.refresh_token.clone(),
-                                                                refresh_expires_at: match t.refresh_expires_in {
-                                                                    Some(e) => Some(now + chrono::Duration::seconds(e)),
-                                                                    None => None
-                                                                },
-                                                            });
-                                                            t.access_token
-                                                        })
-                                                )
-                                            }
-                                            Err(e) => Either::B(err(actix_web::error::ErrorInternalServerError(e)))
-                                        }),
-                                        None => Either::B(err(actix_web::error::ErrorInternalServerError("no token endpoint")))
-                                    }
-                                })));
-                        }
+                                let mut c = crate::util::async_reqwest_to_error(
+                                    self.client.post(&u).form(&form)
+                                ).await?;
+                                let t = c.json::<OAuthTokenResponse>().compat().await?;
+                                *self._access_token.write().unwrap() = Some(OAuthToken {
+                                    access_token: t.access_token.clone(),
+                                    expires_at: now + chrono::Duration::seconds(t.expires_in),
+                                    refresh_token: t.refresh_token.clone(),
+                                    refresh_expires_at: match t.refresh_expires_in {
+                                        Some(e) => Some(now + chrono::Duration::seconds(e)),
+                                        None => None
+                                    },
+                                    id_token: None,
+                                });
+                                Ok(t.access_token)
+                            }
+                            None => Err(failure::err_msg("no token endpoint"))
+                        };
                     }
                 }
             }
         }
 
-        Either::B(self.clone().well_known()
-            .and_then(move |w| {
-                match w.token_endpoint {
-                    Some(e) => Either::A(match reqwest::Url::parse(&e) {
-                        Ok(u) => {
-                            let form = OAuthTokenGrantForm {
-                                client_id: config.client_id.clone(),
-                                client_secret: config.client_secret.clone(),
-                                grant_type: "client_credentials".to_string(),
-                            };
-
-                            Either::A(
-                                client.post(u)
-                                    .form(&form)
-                                    .send()
-                                    .and_then(|mut c| c.json::<OAuthTokenResponse>())
-                                    .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-                                    .map(move |t| {
-                                        *self._access_token.write().unwrap() = Some(OAuthToken {
-                                            access_token: t.access_token.clone(),
-                                            expires_at: now + chrono::Duration::seconds(t.expires_in),
-                                            refresh_token: t.refresh_token.clone(),
-                                            refresh_expires_at: match t.refresh_expires_in {
-                                                Some(e) => Some(now + chrono::Duration::seconds(e)),
-                                                None => None
-                                            },
-                                        });
-                                        t.access_token
-                                    })
-                            )
-                        }
-                        Err(e) => Either::B(err(actix_web::error::ErrorInternalServerError(e)))
-                    }),
-                    None => Either::B(err(actix_web::error::ErrorInternalServerError("no token endpoint")))
-                }
-            }))
-    }
-
-    pub async fn introspect_token(self, token: &str) {
         let w = self.well_known().await?;
-        match w.introspection_endpoint {
-            Some(e) => match reqwest::Url::parse(&e) {
-                Ok(u) => {
-                    let form = OAuthTokenIntrospectForm {
-                        client_id: self.config.client_id,
-                        client_secret: self.config.client_secret,
-                        token: self.token,
-                    };
+        match w.token_endpoint {
+            Some(u) => {
+                let form = OAuthTokenGrantForm {
+                    client_id: &self.config.client_id,
+                    client_secret: &self.config.client_secret,
+                    grant_type: "client_credentials",
+                };
 
-                    let mut c = client.post(u).form(&form).send().await?;
-                    c.json::<OAuthTokenIntrospect>().await
-                }
-                Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
-            },
-            None => Err(actix_web::error::ErrorInternalServerError("no introspection endpoint"))
+                let mut c = crate::util::async_reqwest_to_error(
+                    self.client.post(&u).form(&form)
+                ).await?;
+                let t = match c.json::<OAuthTokenResponse>().compat().await {
+                    Ok(c) => c,
+                    Err(e) => return Err(e.into())
+                };
+                *self._access_token.write().unwrap() = Some(OAuthToken {
+                    access_token: t.access_token.clone(),
+                    expires_at: now + chrono::Duration::seconds(t.expires_in),
+                    refresh_token: t.refresh_token.clone(),
+                    refresh_expires_at: match t.refresh_expires_in {
+                        Some(e) => Some(now + chrono::Duration::seconds(e)),
+                        None => None
+                    },
+                    id_token: None,
+                });
+                Ok(t.access_token)
+            }
+            None => Err(failure::err_msg("no token endpoint"))
         }
     }
 
-    pub async fn verify_token(self, token: &str, role: &str) {
-        let i = self.clone().introspect_token(token).await?;
+    pub async fn introspect_token(&self, token: &str) -> Result<OAuthTokenIntrospect, Error> {
+        let w = self.well_known().await?;
+        match w.introspection_endpoint {
+            Some(u) => {
+                let form = OAuthTokenIntrospectForm {
+                    client_id: &self.config.client_id,
+                    client_secret: &self.config.client_secret,
+                    token,
+                };
+
+                let mut c = crate::util::async_reqwest_to_error(
+                    self.client.post(&u).form(&form)
+                ).await?;
+
+                let i = c.json::<OAuthTokenIntrospect>().compat().await?;
+                Ok(i)
+            }
+            None => Err(failure::err_msg("no introspection endpoint"))
+        }
+    }
+
+    pub async fn verify_token<'a, R>(&self, token: &str, role: R) -> Result<OAuthTokenIntrospect, VerifyTokenError>
+        where R: Into<Option<&'a str>>
+    {
+        let i = self.introspect_token(token).await?;
+
+        if !i.active {
+            return Err(VerifyTokenError::Forbidden);
+        }
+
         match (&i.aud, &i.resource_access) {
             (Some(aud), Some(resource_access)) => {
-                if !aud.contains(&self.config.client_id) ||
-                    !resource_access.contains_key(&self.config.client_id) ||
-                    !resource_access.get(&self.config.client_id).unwrap().roles.contains(&role.to_owned()) {
-                    return Err(actix_web::error::ErrorForbidden(""));
+                if let Some(r) = role.into() {
+                    if !aud.contains(&self.config.client_id) ||
+                        !resource_access.contains_key(&self.config.client_id) ||
+                        !resource_access.get(&self.config.client_id).unwrap().roles.contains(&r.to_owned()) {
+                        return Err(VerifyTokenError::Forbidden);
+                    }
                 }
 
                 Ok(i)
             }
-            _ => Err(actix_web::error::ErrorForbidden(""))
+            _ => Err(VerifyTokenError::Forbidden)
+        }
+    }
+
+    pub async fn update_and_verify_token<'a, R>(&self, token: OAuthToken, role: R) -> Result<(OAuthTokenIntrospect, OAuthToken), VerifyTokenError>
+        where R: Into<Option<&'a str>>
+    {
+        let now = Utc::now();
+
+        let access_token = {
+            if token.expires_at > now {
+                token
+            } else if let Some(refresh_expires_at) = token.refresh_expires_at {
+                if let Some(refresh_token) = &token.refresh_token {
+                    if refresh_expires_at > now {
+                        let w = self.well_known().await?;
+                        match w.token_endpoint {
+                            Some(u) => {
+                                let grant = OAuthTokenGrantForm {
+                                    client_id: &self.config.client_id,
+                                    client_secret: &self.config.client_secret,
+                                    grant_type: "refresh_token",
+                                };
+
+                                let form = OAuthTokenRefreshGrantForm {
+                                    grant,
+                                    refresh_token: &refresh_token,
+                                };
+
+                                let mut c = crate::util::async_reqwest_to_error(
+                                    self.client.post(&u).form(&form)
+                                ).await?;
+                                let t = c.json::<OAuthTokenResponse>().compat().await?;
+
+                                OAuthToken {
+                                    access_token: t.access_token.clone(),
+                                    expires_at: now + chrono::Duration::seconds(t.expires_in),
+                                    refresh_token: t.refresh_token.clone(),
+                                    refresh_expires_at: match t.refresh_expires_in {
+                                        Some(e) => Some(now + chrono::Duration::seconds(e)),
+                                        None => None
+                                    },
+                                    id_token: None,
+                                }
+                            }
+                            None => return Err(VerifyTokenError::InternalServerError("no token endpoint".to_string()))
+                        }
+                    } else {
+                        return Err(VerifyTokenError::Forbidden);
+                    }
+                } else {
+                    return Err(VerifyTokenError::Forbidden);
+                }
+            } else {
+                return Err(VerifyTokenError::Forbidden);
+            }
+        };
+
+        let introspect = self.verify_token(&access_token.access_token, role).await?;
+
+        Ok((introspect, access_token.to_owned()))
+    }
+
+    pub async fn verify_id_token(&self, token: &str) -> Result<OAuthIdToken, Error> {
+        let keys = self.jwks().await?;
+
+        let validations = vec![
+            alcoholic_jwt::Validation::Audience(self.config.client_id.clone()),
+            alcoholic_jwt::Validation::NotExpired,
+            alcoholic_jwt::Validation::SubjectPresent,
+        ];
+
+        let kid = match match alcoholic_jwt::token_kid(token) {
+            Ok(k) => k,
+            Err(e) => return Err(failure::err_msg(format!("{:?}", e)))
+        } {
+            Some(k) => k,
+            None => return Err(failure::err_msg("no token kid"))
+        };
+
+        let key = match keys.find(&kid) {
+            Some(k) => k,
+            None => return Err(failure::err_msg("unable to find key"))
+        };
+
+        let token = match alcoholic_jwt::validate(token, key, validations) {
+            Ok(k) => k,
+            Err(e) => return Err(failure::err_msg(format!("{:?}", e)))
+        };
+
+        match serde_json::from_value(token.claims) {
+            Ok(c) => Ok(c),
+            Err(e) => Err(e.into())
         }
     }
 }
@@ -279,7 +500,7 @@ impl BearerAuthToken {
 }
 
 impl actix_web::FromRequest for BearerAuthToken {
-    type Error = actix_web::HttpResponse;
+    type Error = actix_web::Error;
     type Future = Result<Self, Self::Error>;
     type Config = ();
 
@@ -293,13 +514,13 @@ impl actix_web::FromRequest for BearerAuthToken {
                         token: auth_token_str[7..].to_owned()
                     })
                 } else {
-                    Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED))
+                    Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
                 }
             } else {
-                Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED))
+                Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
             }
         } else {
-            Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED))
+            Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
         }
     }
 }

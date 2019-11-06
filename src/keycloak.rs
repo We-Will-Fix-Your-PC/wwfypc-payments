@@ -1,6 +1,7 @@
-use futures::prelude::*;
-use futures::future::{err, Either};
+use rand::prelude::*;
 use std::collections::HashMap;
+use futures::compat::Future01CompatExt;
+use failure::{Error, Fallible};
 
 #[derive(Clone, Debug)]
 pub struct KeycloakClientConfig {
@@ -42,6 +43,8 @@ pub struct User {
     pub groups: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    #[serde(rename = "requiredActions", skip_serializing_if = "Option::is_none")]
+    pub required_actions: Option<Vec<String>>,
     #[serde(rename = "realmRoles", skip_serializing_if = "Option::is_none")]
     pub realm_roles: Option<Vec<String>>,
     #[serde(rename = "clientRoles", skip_serializing_if = "Option::is_none")]
@@ -52,6 +55,13 @@ pub struct User {
     _client: Option<KeycloakClient>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateUser {
+    pub username: String,
+    pub email: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Role {
     pub id: uuid::Uuid,
@@ -59,74 +69,87 @@ pub struct Role {
 }
 
 impl User {
-    pub fn update<'a>(&self, token: &str) -> impl Future<Item=(), Error=actix_web::Error> + 'a {
-        let client = self._client.clone().unwrap();
+    pub async fn update(&self, token: &str) -> Fallible<()> {
+        let client = self._client.as_ref().unwrap();
+        let u = client.config.base_url.join(&format!("users/{}", self.id.to_string()))?;
 
-        match client.config.base_url.join(&format!("users/{}", self.id.to_string())) {
-            Ok(u) => Either::A(
-                client.client.put(u)
-                    .json(self)
-                    .bearer_auth(token)
-                    .send()
-                    .and_then(|c| c.error_for_status())
-                    .map(|_| ())
-                    .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-            ),
-            Err(e) => Either::B(err(actix_web::error::ErrorInternalServerError(e)))
-        }
+        crate::util::async_reqwest_to_error(
+            client.client
+                .put(u)
+                .json(self)
+                .bearer_auth(token)
+        ).await?;
+        Ok(())
     }
 
-    pub fn add_role<'a>(mut self, new_roles: &'a [&'a str], token: String) -> impl Future<Item=Self, Error=actix_web::Error> + 'a {
-        let client = self._client.clone().unwrap();
+    pub async fn add_role(&mut self, new_roles: &[&str], token: &str) -> Fallible<()> {
+        let client = self._client.as_ref().unwrap();
 
-        match client.config.base_url.join(&format!("users/{}/role-mappings/realm/available", self.id.to_string())) {
-            Ok(u) => Either::A(
-                client.client.get(u)
-                    .bearer_auth(token.clone())
-                    .send()
-                    .and_then(|c| c.error_for_status())
-                    .and_then(|mut c| c.json::<Vec<Role>>())
-                    .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-                    .and_then(move |roles| {
-                        let roles_to_add = new_roles.into_iter().map(|r1| {
-                            match roles.iter().filter(|r2| {
-                                r2.name == r1.to_string()
-                            }).next() {
-                                Some(r) => Some(r.to_owned()),
-                                None => None
-                            }
-                        })
-                            .filter(|r| Option::is_some(r))
-                            .map(|r| r.unwrap())
-                            .collect::<Vec<Role>>();
+        let u = client.config.base_url.join(&format!("users/{}/role-mappings/realm/available", self.id.to_string()))?;
 
-                        match client.config.base_url.join(&format!("users/{}/role-mappings/realm", self.id.to_string())) {
-                            Ok(u) => Either::A(
-                                client.client.post(u)
-                                    .json(&roles_to_add)
-                                    .bearer_auth(token)
-                                    .send()
-                                    .and_then(|c| c.error_for_status())
-                                    .map(move |_| {
-                                        let realm_roles = match self.realm_roles.as_mut() {
-                                            Some(m) => m,
-                                            None => {
-                                                let roles = vec![];
-                                                self.realm_roles = Some(roles);
-                                                self.realm_roles.as_mut().unwrap()
-                                            }
-                                        };
-                                        realm_roles.append(&mut new_roles.into_iter().map(|s| s.to_string()).collect());
-                                        self
-                                    })
-                                    .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-                            ),
-                            Err(e) => Either::B(err(actix_web::error::ErrorInternalServerError(e)))
-                        }
-                    })
-            ),
-            Err(e) => Either::B(err(actix_web::error::ErrorInternalServerError(e)))
-        }
+        let mut c = crate::util::async_reqwest_to_error(
+            client.client
+                .get(u)
+                .bearer_auth(token)
+        ).await?;
+        let roles = c.json::<Vec<Role>>().compat().await?;
+
+        let roles_to_add = new_roles.into_iter().map(|r1| {
+            match roles.iter().filter(|r2| {
+                r2.name == r1.to_string()
+            }).next() {
+                Some(r) => Some(r.to_owned()),
+                None => None
+            }
+        })
+            .filter(|r| Option::is_some(r))
+            .map(|r| r.unwrap())
+            .collect::<Vec<Role>>();
+
+        let r = client.config.base_url.join(&format!("users/{}/role-mappings/realm", self.id.to_string()))?;
+        crate::util::async_reqwest_to_error(
+            client.client.post(r)
+                .json(&roles_to_add)
+                .bearer_auth(token)
+        ).await?;
+
+        let realm_roles = match self.realm_roles.as_mut() {
+            Some(m) => m,
+            None => {
+                let roles = vec![];
+                self.realm_roles = Some(roles);
+                self.realm_roles.as_mut().unwrap()
+            }
+        };
+        realm_roles.append(&mut new_roles.into_iter().map(|s| s.to_string()).collect());
+        Ok(())
+    }
+
+    pub async fn required_actions(&mut self, actions: &[&str], token: &str) -> Fallible<()> {
+        let client = self._client.as_ref().unwrap();
+        let mut actions: Vec<String> = actions.iter()
+            .map(|a| a.to_string())
+            .collect();
+
+        let u = client.config.base_url.join(&format!("users/{}/execute-actions-email", self.id.to_string()))?;
+
+        crate::util::async_reqwest_to_error(
+            client.client
+                .put(u)
+                .json(&actions)
+                .bearer_auth(token)
+        ).await?;
+
+        let required_actions = match self.required_actions.as_mut() {
+            Some(m) => m,
+            None => {
+                let actions = vec![];
+                self.required_actions = Some(actions);
+                self.required_actions.as_mut().unwrap()
+            }
+        };
+        required_actions.append(&mut actions);
+        Ok(())
     }
 
     pub fn set_attribute(&mut self, attr: &str, value: &str) {
@@ -147,6 +170,19 @@ impl User {
             None => false
         }
     }
+
+    pub fn get_attribute(&self, attr: &str) -> Option<String> {
+        match &self.attributes {
+            Some(a) => match a.get(attr) {
+                Some(a) => match a.first() {
+                    Some(s) => Some(s.to_owned()),
+                    None => None
+                },
+                None => None
+            },
+            None => None
+        }
+    }
 }
 
 impl KeycloakClient {
@@ -163,23 +199,118 @@ impl KeycloakClient {
         }
     }
 
-    pub fn get_user<'a>(self, user_id: uuid::Uuid, token: &str) -> impl Future<Item=User, Error=actix_web::Error> + 'a {
-        let client = self.client.clone();
+    pub async fn get_user(&self, user_id: uuid::Uuid, token: &str) -> Fallible<User> {
+        let u = self.config.base_url.join(&format!("users/{}", user_id.to_string()))?;
 
-        match self.config.base_url.join(&format!("users/{}", user_id.to_string())) {
-            Ok(u) => Either::A(
-                client.get(u)
-                    .bearer_auth(token)
-                    .send()
-                    .and_then(|c| c.error_for_status())
-                    .and_then(|mut c| c.json::<User>())
-                    .map(|mut u| {
-                        u._client = Some(self);
-                        u
-                    })
-                    .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-            ),
-            Err(e) => Either::B(err(actix_web::error::ErrorInternalServerError(e)))
+        let mut c = crate::util::async_reqwest_to_error(
+            self.client
+                .get(u)
+                .bearer_auth(token)
+        ).await?;
+        let mut u = c.json::<User>().compat().await?;
+
+        u._client = Some(self.clone());
+        Ok(u)
+    }
+
+    pub async fn get_users(&self, token: &str) -> Fallible<Vec<User>> {
+        let u = self.config.base_url.join("users")?;
+
+        let mut c = crate::util::async_reqwest_to_error(
+            self.client
+                .get(u)
+                .bearer_auth(token)
+        ).await?;
+        let u = c.json::<Vec<User>>().compat().await?
+            .into_iter()
+            .map(|u| {
+                let mut new_u = u.clone();
+                new_u._client = Some(self.clone());
+                u
+            })
+            .collect();
+        Ok(u)
+    }
+
+    pub async fn get_users_expanded(&self, token: &str) -> Fallible<Vec<User>> {
+        let users = self.get_users(token).await?;
+        let users: Vec<_> = users
+            .into_iter()
+            .map(|u| self.get_user(u.id, token))
+            .collect();
+        futures::future::try_join_all(users).await
+    }
+
+    pub async fn get_user_by_email(&self, check_email: &str, token: &str) -> actix_web::Result<Option<User>> {
+        let users = self.get_users(token).await?;
+
+        for user in users {
+            if let Some(email) = &user.email {
+                if email == check_email {
+                    return Ok(Some(user));
+                }
+            }
         }
+
+        Ok(None)
+    }
+
+    pub async fn create_user(&self, email: &str, token: &str) -> Fallible<User> {
+        let users = self.get_users(token).await?;
+
+        fn username_exists(username: &str, users: &Vec<User>) -> bool {
+            let mut users = users
+                .iter()
+                .filter(|u| {
+                    if let Some(u) = &u.username {
+                        u == username
+                    } else {
+                        false
+                    }
+                });
+
+            match users.next() {
+                Some(_) => true,
+                None => false
+            }
+        };
+
+        let mut preferred_username = email.to_string();
+        while username_exists(&preferred_username, &users) {
+            preferred_username = rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(10)
+                .collect();
+        }
+
+        let u = self.config.base_url.join("users")?;
+        let c = crate::util::async_reqwest_to_error(
+            self.client
+                .post(u)
+                .json(&CreateUser {
+                    username: preferred_username,
+                    email: email.to_string(),
+                    enabled: true,
+                })
+                .bearer_auth(token)
+        ).await?;
+
+        let location_header = match c.headers().get(reqwest::header::LOCATION) {
+            Some(l) => l,
+            None => return Err(failure::err_msg("No location header"))
+        };
+
+        let location = location_header.to_str()?;
+
+        let location_url = reqwest::Url::parse(location)?;
+
+        let mut c = crate::util::async_reqwest_to_error(
+            self.client
+                .get(location_url)
+                .bearer_auth(token)
+        ).await?;
+        let mut r = c.json::<User>().compat().await?;
+        r._client = Some(self.clone());
+        Ok(r)
     }
 }

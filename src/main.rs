@@ -1,39 +1,30 @@
+#![feature(type_alias_impl_trait)]
 #[macro_use]
 extern crate diesel;
 #[macro_use]
 extern crate diesel_migrations;
 #[macro_use]
 extern crate diesel_derives;
-extern crate dotenv;
 #[macro_use]
 extern crate log;
-extern crate pretty_env_logger;
-extern crate actix_web;
-extern crate actix_cors;
-extern crate actix;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate tera;
-extern crate reqwest;
 #[macro_use]
 extern crate serde;
-extern crate serde_hex;
-extern crate serde_json;
-extern crate futures;
-extern crate http;
-extern crate rust_decimal;
 #[macro_use]
 extern crate diesel_derive_enum;
-extern crate uuid;
-extern crate chrono;
-extern crate crypto;
+#[macro_use]
+extern crate failure;
 
 pub mod schema;
 pub mod models;
 pub mod oauth;
 pub mod keycloak;
 pub mod db;
+pub mod util;
+pub mod jobs;
 
 use actix::prelude::*;
 use actix_cors::Cors;
@@ -43,10 +34,12 @@ use dotenv::dotenv;
 use std::env;
 use actix_web::{web, middleware, App, HttpServer, HttpRequest, HttpResponse};
 use tera::Tera;
-use futures::future::{err, ok, Either, join_all};
 use chrono::prelude::*;
 use std::collections::HashMap;
 use crypto::mac::Mac;
+use futures::compat::Future01CompatExt;
+use actix_redis::RedisSession;
+use std::sync::{Arc, Mutex};
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
@@ -97,19 +90,19 @@ fn keycloak_client() -> keycloak::KeycloakClient {
     keycloak::KeycloakClient::new(config)
 }
 
-fn cookie_session() -> actix_session::CookieSession {
+fn cookie_session() -> actix_redis::RedisSession {
     dotenv().ok();
 
     let key = match env::var("PRIVATE_KEY") {
         Ok(k) => k.into_bytes(),
         Err(_) => vec![0; 32]
     };
+    let url = env::var("REDIS_URL")
+        .unwrap_or("127.0.0.1:6379".to_string());
 
-    actix_session::CookieSession::private(&key)
-        .name("wwfypc_payment_session")
-        .path("/")
-        .http_only(true)
-        .secure(true)
+    RedisSession::new(url, &key)
+        .cookie_name("wwfypc-payments-session")
+        .cookie_secure(true)
 }
 
 fn worldpay_config() -> WorldpayConfig {
@@ -121,6 +114,35 @@ fn worldpay_config() -> WorldpayConfig {
     }
 }
 
+fn mail_client() -> lettre::smtp::SmtpClient {
+    dotenv().ok();
+
+    let server = env::var("SMTP_SERVER")
+        .unwrap_or("mail.misell.cymru".to_string());
+    let username = env::var("SMTP_USERNAME")
+        .expect("SMTP_USERNAME must be set");
+    let password = env::var("SMTP_PASSWORD")
+        .expect("SMTP_PASSWORD must be set");
+
+    lettre::smtp::SmtpClient::new_simple(&server)
+        .unwrap()
+        .hello_name(lettre::smtp::extension::ClientId::Domain("payments.cardifftec.uk".to_string()))
+        .connection_reuse(lettre::smtp::ConnectionReuseParameters::ReuseUnlimited)
+        .credentials(lettre::smtp::authentication::Credentials::new(username, password))
+        .authentication_mechanism(lettre::smtp::authentication::Mechanism::Plain)
+        .smtp_utf8(true)
+}
+
+fn amqp_client() -> amqp::Channel {
+    dotenv().ok();
+
+    let server = env::var("AMPQ_SERVER")
+        .unwrap_or("amqp://localhost//".to_string());
+    let mut session = amqp::Session::open_url(&server).unwrap();
+    let channel = session.open_channel(1).unwrap();
+    channel
+}
+
 #[derive(Clone)]
 struct WorldpayConfig {
     test_key: String,
@@ -128,11 +150,12 @@ struct WorldpayConfig {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     oauth: oauth::OAuthClient,
     keycloak: keycloak::KeycloakClient,
     worldpay: WorldpayConfig,
     db: Addr<db::DbExecutor>,
+    jobs_state: jobs::JobsState,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -156,46 +179,10 @@ struct NewPaymentResponseData {
     id: uuid::Uuid,
 }
 
-async fn new_payment(token: oauth::BearerAuthToken, data: web::Data<AppState>, new_payment: web::Json<NewPaymentData>) {
+async fn new_payment(token: oauth::BearerAuthToken, data: web::Data<AppState>, new_payment: web::Json<NewPaymentData>) -> actix_web::Result<impl actix_web::Responder> {
     let new_payment_items = new_payment.items.to_owned();
 
-//    data.oauth.clone().verify_token(token.token().to_owned(), "create-payments")
-//        .and_then(move |_| {
-//            let payment_id = uuid::Uuid::new_v4();
-//
-//            let items: Vec<db::CreatePaymentItem> = new_payment_items.into_iter()
-//                .map(|i| db::CreatePaymentItem::new(
-//                    &uuid::Uuid::new_v4(),
-//                    &i.item_type,
-//                    &i.item_data,
-//                    &i.title,
-//                    i.quantity,
-//                    &i.price,
-//                ))
-//                .collect();
-//
-//            data_1.db.send(db::CreatePayment::new(
-//                &payment_id,
-//                &Utc::now().naive_utc(),
-//                models::PaymentState::OPEN,
-//                new_payment.environment,
-//                &new_payment.customer_id,
-//                &items,
-//            ))
-//                .from_err()
-//        })
-//        .and_then(|res| match res {
-//            Ok(payment) => Ok(payment),
-//            Err(e) => Err(actix_web::error::ErrorInternalServerError(e)),
-//        })
-//        .map(move |payment| {
-//            let response = NewPaymentResponseData {
-//                id: payment.id
-//            };
-//            HttpResponse::Ok().json(response)
-//        })
-
-    data.oauth.clone().verify_token(token.token().to_owned(), "create-payments").await?;
+    data.oauth.verify_token(token.token(), "create-payments").await?;
 
     let payment_id = uuid::Uuid::new_v4();
 
@@ -217,15 +204,15 @@ async fn new_payment(token: oauth::BearerAuthToken, data: web::Data<AppState>, n
         new_payment.environment,
         &new_payment.customer_id,
         &items,
-    )).await?;
+    )).compat().await?;
 
     match res {
         Ok(payment) => {
-             let response = NewPaymentResponseData {
+            let response = NewPaymentResponseData {
                 id: payment.id
             };
             Ok(HttpResponse::Ok().json(response))
-        },
+        }
         Err(e) => Err(actix_web::error::ErrorInternalServerError(e)),
     }
 }
@@ -259,70 +246,71 @@ struct PaymentResponseData {
     items: Vec<PaymentItemResponseData>,
 }
 
-fn get_payment<'a>(data: web::Data<AppState>, info: web::Path<(uuid::Uuid)>, session: actix_session::Session) -> impl Future<Item=impl actix_web::Responder, Error=actix_web::error::Error> + 'a {
+async fn get_payment<'a>(data: web::Data<AppState>, info: web::Path<uuid::Uuid>, session: actix_session::Session) -> actix_web::Result<impl actix_web::Responder> {
     match match session.get::<uuid::Uuid>("sess_id") {
         Ok(s) => s,
-        Err(e) => return Either::A(err(actix_web::error::ErrorInternalServerError(e)))
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
         Some(_) => {}
         None => match session.set("sess_id", uuid::Uuid::new_v4()) {
             Ok(_) => {}
-            Err(e) => return Either::A(err(actix_web::error::ErrorInternalServerError(e)))
+            Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
         }
     }
 
-    Either::B(data.db.send(db::GetPayment::new(&info.into_inner()))
-        .from_err()
-        .and_then(|res| match res {
-            Ok(payment) => Ok(payment),
-            Err(e) => Err(actix_web::error::ErrorNotFound(e))
-        })
-        .and_then(move |payment| {
-            data.db.send(db::GetPaymentItems::new(&payment))
-                .from_err()
-                .and_then(|res| match res {
-                    Ok(items) => Ok(items),
-                    Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
-                })
-                .and_then(move |items| {
-                    data.oauth.clone().get_access_token()
-                        .and_then(move |token| {
-                            data.keycloak.clone().get_user(payment.customer_id, &token)
-                                .and_then(move |user| {
-                                    HttpResponse::Ok().json(PaymentResponseData {
-                                        id: payment.id,
-                                        timestamp: DateTime::<Utc>::from_utc(payment.time, Utc),
-                                        state: payment.state,
-                                        environment: payment.environment,
-                                        customer: PaymentCustomerResponseData {
-                                            id: user.id,
-                                            name: format!("{} {}", user.first_name.unwrap_or("".to_string()), user.last_name.unwrap_or("".to_string())),
-                                            email: user.email,
-                                            phone: match user.attributes {
-                                                Some(a) => match a.get("phone") {
-                                                    Some(p) => match p.first() {
-                                                        Some(s) => Some(s.to_owned()),
-                                                        None => None
-                                                    },
-                                                    None => None
-                                                },
-                                                None => None
-                                            },
-                                        },
-                                        items: items.into_iter()
-                                            .map(|item| PaymentItemResponseData {
-                                                id: item.id,
-                                                item_type: item.item_type,
-                                                item_data: item.item_data,
-                                                title: item.title,
-                                                price: (item.price.0 as f64) / 100.0,
-                                            })
-                                            .collect(),
-                                    })
-                                })
-                        })
-                })
-        }))
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+        Ok(payment) => payment,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(payment) => payment,
+        Err(e) => return match e {
+            diesel::result::Error::NotFound => Err(actix_web::error::ErrorNotFound(e)),
+            _ => Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    };
+    let items = match match data.db.send(db::GetPaymentItems::new(&payment)).compat().await {
+        Ok(items) => items,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(items) => items,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    };
+
+    let token = data.oauth.get_access_token().await?;
+    let user = data.keycloak.clone().get_user(payment.customer_id, &token).await?;
+
+    let response_data = PaymentResponseData {
+        id: payment.id,
+        timestamp: DateTime::<Utc>::from_utc(payment.time, Utc),
+        state: payment.state,
+        environment: payment.environment,
+        customer: PaymentCustomerResponseData {
+            id: user.id,
+            name: format!("{} {}", user.first_name.unwrap_or("".to_string()), user.last_name.unwrap_or("".to_string())),
+            email: user.email,
+            phone: match user.attributes {
+                Some(a) => match a.get("phone") {
+                    Some(p) => match p.first() {
+                        Some(s) => Some(s.to_owned()),
+                        None => None
+                    },
+                    None => None
+                },
+                None => None
+            },
+        },
+        items: items.into_iter()
+            .map(|item| PaymentItemResponseData {
+                id: item.id,
+                item_type: item.item_type,
+                item_data: item.item_data,
+                title: item.title,
+                price: (item.price.0 as f64) / 100.0,
+            })
+            .collect(),
+    };
+
+    Ok(HttpResponse::Ok().json(response_data))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -330,48 +318,51 @@ struct PaymentStateData {
     state: Option<String>
 }
 
-fn render_payment<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<(uuid::Uuid)>, form: Option<web::Form<PaymentStateData>>, template_name: &'a str) -> impl Future<Item=impl actix_web::Responder, Error=actix_web::error::Error> + 'a {
-    data.db.send(db::GetPayment::new(&info.into_inner()))
-        .from_err()
-        .and_then(|res| match res {
-            Ok(payment) => Ok(payment),
-            Err(e) => Err(actix_web::error::ErrorNotFound(e))
-        })
-        .and_then(move |payment| {
-            let is_open_payment = payment.state == models::PaymentState::OPEN;
-            let is_test = payment.environment != models::PaymentEnvironment::LIVE;
-            let accepts = match req.headers().get(actix_web::http::header::ACCEPT) {
-                Some(a) => match a.to_str() {
-                    Ok(a) => a,
-                    Err(e) => return Err(actix_web::error::ErrorBadRequest(e))
-                },
-                None => "*/*"
-            };
-            let state = match form {
-                Some(f) => f.state.to_owned(),
-                None => None
-            };
+async fn render_payment(req: HttpRequest, data: web::Data<AppState>, info: web::Path<uuid::Uuid>, form: Option<web::Form<PaymentStateData>>, template_name: &str) -> actix_web::Result<impl actix_web::Responder> {
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(r) => r,
+        Err(e) => return match e {
+            diesel::result::Error::NotFound => Err(actix_web::error::ErrorNotFound(e)),
+            _ => Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    };
 
-            let mut context = tera::Context::new();
-            context.insert("payment_id", &payment.id);
-            context.insert("is_open_payment", &is_open_payment);
-            context.insert("test", &is_test);
-            context.insert("accepts_header", &accepts);
-            context.insert("state", &state);
+    let is_open_payment = payment.state == models::PaymentState::OPEN;
+    let is_test = payment.environment != models::PaymentEnvironment::LIVE;
+    let accepts = match req.headers().get(actix_web::http::header::ACCEPT) {
+        Some(a) => match a.to_str() {
+            Ok(a) => a,
+            Err(e) => return Err(actix_web::error::ErrorBadRequest(e))
+        },
+        None => "*/*"
+    };
+    let state = match form {
+        Some(f) => f.state.to_owned(),
+        None => None
+    };
 
-            match TERA.render(template_name, &context) {
-                Ok(r) => Ok(HttpResponse::Ok().body(r)),
-                Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
-            }
-        })
+    let mut context = tera::Context::new();
+    context.insert("payment_id", &payment.id);
+    context.insert("is_open_payment", &is_open_payment);
+    context.insert("test", &is_test);
+    context.insert("accepts_header", &accepts);
+    context.insert("state", &state);
+
+    match TERA.render(template_name, &context) {
+        Ok(r) => Ok(HttpResponse::Ok().body(r)),
+        Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
+    }
 }
 
-fn render_fb_payment_get<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<(uuid::Uuid)>) -> impl Future<Item=impl actix_web::Responder, Error=actix_web::error::Error> + 'a {
-    render_payment(req, data, info, None, "fb_payment.html")
+async fn render_fb_payment_get(req: HttpRequest, data: web::Data<AppState>, info: web::Path<uuid::Uuid>) -> actix_web::Result<impl actix_web::Responder> {
+    render_payment(req, data, info, None, "fb_payment.html").await
 }
 
-fn render_fb_payment_post<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<(uuid::Uuid)>, form: web::Form<PaymentStateData>) -> impl Future<Item=impl actix_web::Responder, Error=actix_web::error::Error> + 'a {
-    render_payment(req, data, info, Some(form), "fb_payment.html")
+async fn render_fb_payment_post(req: HttpRequest, data: web::Data<AppState>, info: web::Path<uuid::Uuid>, form: web::Form<PaymentStateData>) -> actix_web::Result<impl actix_web::Responder> {
+    render_payment(req, data, info, Some(form), "fb_payment.html").await
 }
 
 
@@ -433,6 +424,8 @@ enum WorldpayPaymentStatus {
     FAILED,
     #[serde(rename = "3DS")]
     THREEDS,
+    #[serde(rename = "EXISTING_ACCOUNT")]
+    ExistingAccount,
     UNKNOWN,
 }
 
@@ -586,243 +579,298 @@ struct WorldpayOrderResp {
     one_time_3ds_token: Option<String>,
 }
 
-fn process_worldpay_payment<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<(uuid::Uuid)>, session: actix_session::Session, payment_data: web::Json<WorldpayPaymentData>) -> impl Future<Item=impl actix_web::Responder, Error=actix_web::error::Error> + 'a {
+async fn process_worldpay_payment(req: HttpRequest, data: web::Data<AppState>, info: web::Path<uuid::Uuid>, session: actix_session::Session, payment_data: web::Json<WorldpayPaymentData>) -> actix_web::Result<impl actix_web::Responder> {
     let sess_id = match match session.get::<uuid::Uuid>("sess_id") {
         Ok(s) => s,
-        Err(e) => return Either::A(err(actix_web::error::ErrorInternalServerError(e)))
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
         Some(s) => s,
         None => {
             let s = uuid::Uuid::new_v4();
             match session.set("sess_id", s) {
                 Ok(_) => s,
-                Err(e) => return Either::A(err(actix_web::error::ErrorInternalServerError(e)))
+                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
             }
         }
     };
 
-    Either::B(data.db.send(db::GetPayment::new(&info.into_inner()))
-        .from_err()
-        .and_then(|res| match res {
-            Ok(payment) => Ok((payment, data)),
-            Err(e) => match (e, payment_data.payment) {
-                (diesel::result::Error::NotFound, Some(payment)) => {
-                    data.db.send(db::GetPaymentTokens::new())
-                        .from_err()
-                        .and_then(|res| match res {
-                            Ok(tokens) => {
-                                let items: Vec<db::CreatePaymentItem> = vec![];
-                                for i in payment.items.into_iter() {
-                                    let digest = crypto::sha2::Sha512::new();
-                                    let hmac_data = format!("{}{}{}{}{}", i.item_type, i.item_data, i.title, i.quantity, i.price);
-                                    let sig = crypto::mac::MacResult::new(&i.sig);
+    let token = data.oauth.clone().get_access_token().await?;
 
-                                    let mut validated = false;
-                                    for token in tokens {
-                                        let hmac = crypto::hmac::Hmac::new(digest, &token).result();
+    let payment = match match data.db.send(db::GetPayment::new(&info)).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(r) => r,
+        Err(e) => match (e, payment_data.payment.as_ref()) {
+            (diesel::result::Error::NotFound, Some(payment)) => {
+                let tokens = match match data.db.send(db::GetPaymentTokens::new()).compat().await {
+                    Ok(r) => r,
+                    Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+                } {
+                    Ok(r) => r,
+                    Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+                };
+                let mut items: Vec<db::CreatePaymentItem> = vec![];
+                for i in payment.items.iter() {
+                    let digest = crypto::sha2::Sha512::new();
+                    let mut price = i.price * rust_decimal::Decimal::new(100, 0);
+                    price.set_scale(0).unwrap();
+                    let hmac_data = format!("{}{}{}{}{}", i.item_type, i.item_data, i.title, i.quantity, price.to_string()).into_bytes();
+                    let sig = crypto::mac::MacResult::new(&i.sig);
 
-                                        if hmac == sig {
-                                            validated = true;
-                                        }
-                                    }
-                                    if !validated {
-                                        return Err(actix_web::error::ErrorBadRequest("invalid signature"));
-                                    }
+                    let mut validated = false;
+                    for token in &tokens {
+                        let mut hmac = crypto::hmac::Hmac::new(digest, &token.token);
+                        hmac.input(&hmac_data);
+                        let res = hmac.result();
 
-                                    items.push(db::CreatePaymentItem::new(
-                                        &uuid::Uuid::new_v4(),
-                                        &i.item_type,
-                                        &i.item_data,
-                                        &i.title,
-                                        i.quantity,
-                                        &i.price,
-                                    ));
-                                }
+                        if res == sig {
+                            validated = true;
+                        }
+                    }
+                    if !validated {
+                        return Err(actix_web::error::ErrorBadRequest("invalid signature"));
+                    }
 
-                                let payment = db::CreatePayment::new(
-                                    &info.into_inner(),
-                                    &Utc::now().naive_utc(),
-                                    models::PaymentState::OPEN,
-                                    payment.environment,
-                                    &payment.customer_id,
-                                    &items,
-                                );
-
-//                    data.db.send(payment)
-//                        .from_err()
-//                        .and_then(|res| match res {
-//                            Ok(payment) => Ok((payment, data)),
-//                            Err(e) => Err(actix_web::error::ErrorInternalServerError(e)),
-//                        })
-                            }
-                            Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
-                        })
+                    items.push(db::CreatePaymentItem::new(
+                        &uuid::Uuid::new_v4(),
+                        &i.item_type,
+                        &i.item_data,
+                        &i.title,
+                        i.quantity,
+                        &i.price,
+                    ));
                 }
-                (_, _) => Err(actix_web::error::ErrorNotFound(e))
+
+                let user_id = match session.get::<oauth::OAuthToken>("oauth_token") {
+                    Ok(s) => match s {
+                        Some(oauth_token) => {
+                            let (introspect, oauth_token) = data.oauth.update_and_verify_token(oauth_token, None).await?;
+                            match session.set("oauth_token", oauth_token) {
+                                Ok(_) => {}
+                                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+                            }
+
+                            match match introspect.sub {
+                                Some(u) => uuid::Uuid::parse_str(&u),
+                                None => return Err(actix_web::error::ErrorInternalServerError(""))
+                            } {
+                                Ok(u) => u,
+                                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+                            }
+                        }
+                        None => match data.keycloak.get_user_by_email(&payment.customer.email, &token).await? {
+                            Some(_) => {
+                                return Ok(HttpResponse::Ok().json(WorldpayPaymentDataResp {
+                                    state: WorldpayPaymentStatus::ExistingAccount,
+                                    frame: Some(format!("https://{}/login/auth/?{}", req.connection_info().host(), serde_urlencoded::to_string(&[
+                                        ("next", format!("https://{}/payment/login-complete/", req.connection_info().host())),
+                                    ]).unwrap())),
+                                }));
+                            }
+                            None => {
+                                let mut u = data.keycloak.create_user(&payment.customer.email, &token).await?;
+                                u.first_name = Some(payment.customer.name.clone());
+                                u.set_attribute("phone", &payment.customer.phone);
+                                u.update(&token).await?;
+                                u.required_actions(&[
+                                    "UPDATE_PASSWORD",
+                                    "UPDATE_PROFILE",
+                                    "VERIFY_EMAIL"
+                                ], &token).await?;
+
+                                u.id
+                            }
+                        }
+                    },
+                    Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+                };
+
+                let payment = db::CreatePayment::new(
+                    &info.into_inner(),
+                    &Utc::now().naive_utc(),
+                    models::PaymentState::OPEN,
+                    payment.environment,
+                    &user_id,
+                    &items,
+                );
+
+                match match data.db.send(payment).compat().await {
+                    Ok(r) => r,
+                    Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+                } {
+                    Ok(r) => r,
+                    Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+                }
             }
-        })
-        .and_then(|(payment, data)| {
-            data.db.send(db::GetPaymentItems::new(&payment))
-                .from_err()
-                .and_then(|res| match res {
-                    Ok(items) => Ok(items),
-                    Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
-                })
-                .map(|items| (payment, items, data))
-        })
-        .and_then(|(payment, items, data)| {
-            data.oauth.clone().get_access_token()
-                .map(|token| (payment, items, token, data))
-        })
-        .and_then(|(payment, items, token, data)| {
-            data.keycloak.clone().get_user(payment.customer_id, &token)
-                .map(|user| (payment, items, token, user, data))
-        })
-        .and_then(|(payment, items, token, user, data)| {
-            user.add_role(&["customer"], token.clone())
-                .map(|user| (payment, items, token, user, data))
-        })
-        .and_then(move |(payment, items, token, mut user, data)| {
-            if let None = user.email {
-                user.email = Some(payment_data.email.clone());
-            }
-            if let None = user.first_name {
-                user.first_name = Some(payment_data.payer_name.clone());
-            }
-            if !user.has_attribute("phone") {
-                user.set_attribute("phone", &payment_data.billing_address.phone);
-            }
+            (diesel::result::Error::NotFound, None) => return Err(actix_web::error::ErrorNotFound(diesel::result::Error::NotFound)),
+            (e, _) => return Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    };
 
-            user.update(&token)
-                .and_then(move |_| {
-                    let billing_address = WorldpayBillingAddress::from(&payment_data.billing_address);
+    let items = match match data.db.send(db::GetPaymentItems::new(&payment)).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    };
 
-                    let description: String = items.iter().map(|i| i.title.clone()).collect::<Vec<String>>().join(", ");
-                    let total = items.iter().map(|i| i.price.0 * i.quantity as i64).fold(0, |acc, i| acc + i);
+    let mut user = data.keycloak.clone().get_user(payment.customer_id, &token).await?;
 
-                    println!("{}", payment_data.accepts);
+    user.add_role(&["customer"], &token).await?;
+    if let None = user.email {
+        user.email = Some(payment_data.email.clone());
+    }
+    if let None = user.first_name {
+        user.first_name = Some(payment_data.payer_name.clone());
+    }
+    if !user.has_attribute("phone") {
+        user.set_attribute("phone", &payment_data.billing_address.phone);
+    }
+    user.update(&token).await?;
 
-                    let mut order_data = WorldpayOrder {
-                        order_type: "ECOM".to_string(),
-                        order_description: description,
-                        customer_order_code: payment.id.to_string(),
-                        amount: total,
-                        currency_code: "GBP".to_string(),
-                        name: payment_data.payer_name.clone(),
-                        shopper_email_address: payment_data.email.clone(),
-                        billing_address,
-                        shopper_ip_address: req.connection_info().remote().unwrap_or("").to_string(),
-                        shopper_user_agent: req.headers().get(actix_web::http::header::USER_AGENT)
-                            .unwrap_or(&actix_web::http::header::HeaderValue::from_static("")).to_str()
-                            .unwrap_or("").to_string(),
-                        shopper_accept_header: payment_data.accepts.clone(),
-                        shopper_session_id: sess_id.to_string(),
-                        is_3ds_order: true,
-                        authorize_only: total == 0,
-                        token: None,
-                    };
+    let billing_address = WorldpayBillingAddress::from(&payment_data.billing_address);
 
-                    order_data.token = Some(payment_data.token.to_string());
-                    data.db.send(db::CreateCardToken::new(
-                        &payment.customer_id,
-                        &payment_data.token,
-                    ))
-                        .from_err()
-                        .and_then(move |_| {
-                            let worldpay_token = match payment.environment {
-                                models::PaymentEnvironment::LIVE => &data.worldpay.live_key,
-                                models::PaymentEnvironment::TEST => &data.worldpay.test_key,
-                            };
+    let description: String = items.iter().map(|i| i.title.clone()).collect::<Vec<String>>().join(", ");
+    let total = items.iter().map(|i| i.price.0 * i.quantity as i64).fold(0, |acc, i| acc + i);
 
-                            reqwest::r#async::Client::new().post("https://api.worldpay.com/v1/orders")
-                                .header(reqwest::header::AUTHORIZATION, worldpay_token)
-                                .json(&order_data)
-                                .send()
-                                .and_then(|c| c.error_for_status())
-                                .and_then(|mut c| c.json::<WorldpayOrderResp>())
-                                .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-                                .and_then(move |r| {
-                                    match r.payment_status {
-                                        WorldpayOrderStatus::Success | WorldpayOrderStatus::Authorized => {
-                                            Either::A(Either::A(
-                                                data.db.send(db::UpdatePaymentState::new(
-                                                    &payment.id,
-                                                    models::PaymentState::PAID,
-                                                    Some(&format!("{} {}", r.payment_response.card_issuer, r.payment_response.masked_card_number)),
-                                                ))
-                                                    .from_err()
-                                                    .map(|_| {
-                                                        HttpResponse::Ok().json(WorldpayPaymentDataResp {
-                                                            state: WorldpayPaymentStatus::SUCCESS,
-                                                            frame: None,
-                                                        })
-                                                    })
-                                            ))
-                                        }
-                                        WorldpayOrderStatus::PreAuthorized => {
-                                            Either::A(Either::B(
-                                                data.db.send(db::CreateThreedsData::new(
-                                                    &payment.id,
-                                                    &r.one_time_3ds_token.unwrap(),
-                                                    &r.redirect_url.unwrap(),
-                                                    &r.order_code,
-                                                ))
-                                                    .from_err()
-                                                    .map(move |_| {
-                                                        HttpResponse::Ok().json(WorldpayPaymentDataResp {
-                                                            state: WorldpayPaymentStatus::THREEDS,
-                                                            frame: Some(format!("https://{}/payment/3ds/{}/", req.connection_info().host(), payment.id)),
-                                                        })
-                                                    }))
-                                            )
-                                        }
-                                        WorldpayOrderStatus::Failed => {
-                                            Either::B(ok(HttpResponse::Ok().json(WorldpayPaymentDataResp {
-                                                state: WorldpayPaymentStatus::FAILED,
-                                                frame: None,
-                                            })))
-                                        }
-                                        _ => {
-                                            Either::B(ok(HttpResponse::Ok().json(WorldpayPaymentDataResp {
-                                                state: WorldpayPaymentStatus::UNKNOWN,
-                                                frame: None,
-                                            })))
-                                        }
-                                    }
-                                })
-                        })
-                })
+    let mut order_data = WorldpayOrder {
+        order_type: "ECOM".to_string(),
+        order_description: description,
+        customer_order_code: payment.id.to_string(),
+        amount: total,
+        currency_code: "GBP".to_string(),
+        name: payment_data.payer_name.clone(),
+        shopper_email_address: payment_data.email.clone(),
+        billing_address,
+        shopper_ip_address: req.connection_info().remote().unwrap_or("").to_string(),
+        shopper_user_agent: req.headers().get(actix_web::http::header::USER_AGENT)
+            .unwrap_or(&actix_web::http::header::HeaderValue::from_static("")).to_str()
+            .unwrap_or("").to_string(),
+        shopper_accept_header: payment_data.accepts.clone(),
+        shopper_session_id: sess_id.to_string(),
+        is_3ds_order: true,
+        authorize_only: total == 0,
+        token: None,
+    };
+
+    order_data.token = Some(payment_data.token.to_string());
+    match match data.db.send(db::CreateCardToken::new(
+        &payment.customer_id,
+        &payment_data.token,
+    )).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(_) => {}
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    };
+
+    let worldpay_token = match payment.environment {
+        models::PaymentEnvironment::LIVE => &data.worldpay.live_key,
+        models::PaymentEnvironment::TEST => &data.worldpay.test_key,
+    };
+
+    let mut c = util::async_reqwest_to_error(
+        reqwest::r#async::Client::new().post("https://api.worldpay.com/v1/orders")
+            .header(reqwest::header::AUTHORIZATION, worldpay_token)
+            .json(&order_data)
+    ).await?;
+    let r = match c.json::<WorldpayOrderResp>().compat().await {
+        Ok(c) => c,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    };
+
+    match r.payment_status {
+        WorldpayOrderStatus::Success | WorldpayOrderStatus::Authorized => {
+            match match data.db.send(db::UpdatePaymentState::new(
+                &payment.id,
+                models::PaymentState::PAID,
+                Some(&format!("{} {}", r.payment_response.card_issuer, r.payment_response.masked_card_number)),
+            )).compat().await {
+                Ok(r) => r,
+                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+            } {
+                Ok(_) => {
+                    let job = jobs::CompletePayment::new(&payment.id);
+                    let job_state = data.jobs_state.clone();
+                    std::thread::spawn(move || {
+                        jobs::send_payment_notification(job, job_state)
+                    });
+                }
+                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+            };
+
+            Ok(HttpResponse::Ok().json(WorldpayPaymentDataResp {
+                state: WorldpayPaymentStatus::SUCCESS,
+                frame: None,
+            }))
+        }
+        WorldpayOrderStatus::PreAuthorized => {
+            match match data.db.send(db::CreateThreedsData::new(
+                &payment.id,
+                &r.one_time_3ds_token.unwrap(),
+                &r.redirect_url.unwrap(),
+                &r.order_code,
+            )).compat().await {
+                Ok(r) => r,
+                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+            } {
+                Ok(_) => {}
+                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+            };
+
+            Ok(HttpResponse::Ok().json(WorldpayPaymentDataResp {
+                state: WorldpayPaymentStatus::THREEDS,
+                frame: Some(format!("https://{}/payment/3ds/{}/", req.connection_info().host(), payment.id)),
+            }))
+        }
+        WorldpayOrderStatus::Failed => Ok(HttpResponse::Ok().json(WorldpayPaymentDataResp {
+            state: WorldpayPaymentStatus::FAILED,
+            frame: None,
+        })),
+        _ => Ok(HttpResponse::Ok().json(WorldpayPaymentDataResp {
+            state: WorldpayPaymentStatus::UNKNOWN,
+            frame: None,
         }))
+    }
 }
 
-fn render_3ds_form<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<(uuid::Uuid)>) -> impl Future<Item=impl actix_web::Responder, Error=actix_web::error::Error> + 'a {
-    data.db.send(db::GetPayment::new(&info.into_inner()))
-        .from_err()
-        .and_then(|res| match res {
-            Ok(payment) => Ok(payment),
-            Err(e) => Err(actix_web::error::ErrorNotFound(e))
-        })
-        .and_then(move |payment|
-            data.db.send(db::GetThreedsData::new(&payment))
-                .from_err()
-                .and_then(|res| match res {
-                    Ok(threeds_data) => Ok((threeds_data, payment)),
-                    Err(e) => Err(actix_web::error::ErrorNotFound(e))
-                })
-        )
-        .and_then(move |(threeds_data, payment)| {
-            let connection_info = req.connection_info();
-            let mut context = tera::Context::new();
-            context.insert("redirect", &format!("https://{}/payment/3ds-complete/{}/", connection_info.host(), payment.id));
-            context.insert("redirect_url", &threeds_data.redirect_url);
-            context.insert("one_time_3ds_token", &threeds_data.one_time_3ds_token);
-            context.insert("order_id", &threeds_data.order_id);
+async fn render_3ds_form<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<uuid::Uuid>) -> actix_web::Result<impl actix_web::Responder> {
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(r) => r,
+        Err(e) => return match e {
+            diesel::result::Error::NotFound => Err(actix_web::error::ErrorNotFound(e)),
+            _ => Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    };
 
-            match TERA.render("3ds_form.html", &context) {
-                Ok(r) => Ok(HttpResponse::Ok().body(r)),
-                Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
-            }
-        })
+    let threeds_data = match match data.db.send(db::GetThreedsData::new(&payment)).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(r) => r,
+        Err(e) => return match e {
+            diesel::result::Error::NotFound => Err(actix_web::error::ErrorNotFound(e)),
+            _ => Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    };
+
+    let connection_info = req.connection_info();
+    let mut context = tera::Context::new();
+    context.insert("redirect", &format!("https://{}/payment/3ds-complete/{}/", connection_info.host(), payment.id));
+    context.insert("redirect_url", &threeds_data.redirect_url);
+    context.insert("one_time_3ds_token", &threeds_data.one_time_3ds_token);
+    context.insert("order_id", &threeds_data.order_id);
+
+    match TERA.render("3ds_form.html", &context) {
+        Ok(r) => Ok(HttpResponse::Ok().body(r)),
+        Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -833,93 +881,211 @@ struct ThreedsData {
     response_code: String,
 }
 
-fn render_3ds_complete<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<(uuid::Uuid)>, session: actix_session::Session, form: web::Form<ThreedsData>) -> impl Future<Item=impl actix_web::Responder, Error=actix_web::error::Error> + 'a {
+async fn render_3ds_complete<'a>(req: HttpRequest, data: web::Data<AppState>, info: web::Path<uuid::Uuid>, session: actix_session::Session, form: web::Form<ThreedsData>) -> actix_web::Result<impl actix_web::Responder> {
     let sess_id = match match session.get::<uuid::Uuid>("sess_id") {
         Ok(s) => s,
-        Err(e) => return Either::A(err(actix_web::error::ErrorInternalServerError(e)))
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
         Some(s) => s.to_string(),
         None => "".to_string()
     };
 
-    Either::B(data.db.send(db::GetPayment::new(&info.into_inner()))
-        .from_err()
-        .and_then(|res| match res {
-            Ok(payment) => Ok(payment),
-            Err(e) => Err(actix_web::error::ErrorNotFound(e))
-        })
-        .and_then(move |payment|
-            data.db.send(db::DeleteThreedsData::new(&payment))
-                .from_err()
-                .and_then(|res| match res {
-                    Ok(_) => Ok((payment, data)),
-                    Err(e) => Err(actix_web::error::ErrorNotFound(e))
-                })
-        )
-        .and_then(move |(payment, data)| {
-            let worldpay_token = match payment.environment {
-                models::PaymentEnvironment::LIVE => &data.worldpay.live_key,
-                models::PaymentEnvironment::TEST => &data.worldpay.test_key,
-            };
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(r) => r,
+        Err(e) => return match e {
+            diesel::result::Error::NotFound => Err(actix_web::error::ErrorNotFound(e)),
+            _ => Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    };
+    match match data.db.send(db::DeleteThreedsData::new(&payment)).compat().await {
+        Ok(r) => r,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(_) => {}
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    };
 
+    let worldpay_token = match payment.environment {
+        models::PaymentEnvironment::LIVE => &data.worldpay.live_key,
+        models::PaymentEnvironment::TEST => &data.worldpay.test_key,
+    };
 
-            let order_data = WorldpayThreedsOrder {
-                threeds_response_code: form.response_code.clone(),
-                shopper_ip_address: req.connection_info().remote().unwrap_or("").to_string(),
-                shopper_user_agent: req.headers().get(actix_web::http::header::USER_AGENT)
-                    .unwrap_or(&actix_web::http::header::HeaderValue::from_static("")).to_str()
-                    .unwrap_or("").to_string(),
-                shopper_accept_header: req.headers().get(actix_web::http::header::ACCEPT)
-                    .unwrap_or(&actix_web::http::header::HeaderValue::from_static("*/*")).to_str()
-                    .unwrap_or("*/*").to_string(),
-                shopper_session_id: sess_id.to_string(),
-            };
+    let order_data = WorldpayThreedsOrder {
+        threeds_response_code: form.response_code.clone(),
+        shopper_ip_address: req.connection_info().remote().unwrap_or("").to_string(),
+        shopper_user_agent: req.headers().get(actix_web::http::header::USER_AGENT)
+            .unwrap_or(&actix_web::http::header::HeaderValue::from_static("")).to_str()
+            .unwrap_or("").to_string(),
+        shopper_accept_header: req.headers().get(actix_web::http::header::ACCEPT)
+            .unwrap_or(&actix_web::http::header::HeaderValue::from_static("*/*")).to_str()
+            .unwrap_or("*/*").to_string(),
+        shopper_session_id: sess_id.to_string(),
+    };
 
+    let mut context = tera::Context::new();
+    context.insert("payment_id", &payment.id);
 
-            let mut context = tera::Context::new();
-            context.insert("payment_id", &payment.id);
-            let mut context_2 = context.clone();
-
+    match {
+        match util::async_reqwest_to_error(
             reqwest::r#async::Client::new().put(reqwest::Url::parse(&format!("https://api.worldpay.com/v1/orders/{}", form.order_id)).unwrap())
                 .header(reqwest::header::AUTHORIZATION, worldpay_token)
                 .json(&order_data)
-                .send()
-                .and_then(|c| c.error_for_status())
-                .and_then(|mut c| c.json::<WorldpayOrderResp>())
-                .map_err(|e| actix_web::error::ErrorInternalServerError(e))
-                .and_then(move |r| {
-                    match r.payment_status {
-                        WorldpayOrderStatus::Success | WorldpayOrderStatus::Authorized => {
-                            Either::B(data.db.send(db::UpdatePaymentState::new(
-                                &payment.id,
-                                models::PaymentState::PAID,
-                                Some(&format!("{} {}", r.payment_response.card_issuer, r.payment_response.masked_card_number)),
-                            ))
-                                .from_err()
-                                .map(move |_| {
+        ).await {
+            Ok(mut c) => match c.json::<WorldpayOrderResp>().compat().await {
+                Ok(r) => match r.payment_status {
+                    WorldpayOrderStatus::Success | WorldpayOrderStatus::Authorized => {
+                        match data.db.send(db::UpdatePaymentState::new(
+                            &payment.id,
+                            models::PaymentState::PAID,
+                            Some(&format!("{} {}", r.payment_response.card_issuer, r.payment_response.masked_card_number)),
+                        )).compat().await {
+                            Ok(r) => match r {
+                                Ok(_) => {
+                                    let job = jobs::CompletePayment::new(&payment.id);
+                                    let job_state = data.jobs_state.clone();
+                                    std::thread::spawn(move || {
+                                        jobs::send_payment_notification(job, job_state)
+                                    });
                                     context.insert("threeds_approved", &true);
-                                    match TERA.render("3ds_complete.html", &context) {
-                                        Ok(r) => Ok(HttpResponse::Ok().body(r)),
-                                        Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
-                                    }
-                                }))
+                                    Ok(())
+                                }
+                                Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
+                            },
+                            Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
                         }
-                        _ => Either::A(err(actix_web::error::ErrorInternalServerError("")))
                     }
-                })
-                .then(move |r| {
-                    match r {
-                        Ok(r) => r,
-                        Err(_) => {
-                            context_2.insert("threeds_approved", &false);
-                            match TERA.render("3ds_complete.html", &context_2) {
-                                Ok(r) => Ok(HttpResponse::Ok().body(r)),
-                                Err(e) => Err(actix_web::error::ErrorInternalServerError(e).into())
+                    _ => Err(actix_web::error::ErrorBadRequest(""))
+                },
+                Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
+            },
+            Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    } {
+        Ok(_) => {}
+        Err(_) => {
+            context.insert("threeds_approved", &false);
+        }
+    }
+
+    match TERA.render("3ds_complete.html", &context) {
+        Ok(r) => Ok(HttpResponse::Ok().body(r)),
+        Err(e) => Err(actix_web::error::ErrorInternalServerError(e).into())
+    }
+}
+
+async fn render_login_complete<'a>(data: web::Data<AppState>, session: actix_session::Session) -> actix_web::Result<impl actix_web::Responder> {
+    let mut context = tera::Context::new();
+
+    match {
+        match session.get::<oauth::OAuthToken>("oauth_token") {
+            Ok(s) => match s {
+                Some(oauth_token) => {
+                    match data.oauth.update_and_verify_token(oauth_token, None).await {
+                        Ok((_, oauth_token)) => {
+                            match session.set("oauth_token", oauth_token) {
+                                Ok(_) => Ok(()),
+                                Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
                             }
                         }
+                        Err(e) => Err(e.into())
                     }
-                })
-        }))
+                }
+                None => Err(actix_web::error::ErrorInternalServerError(""))
+            },
+            Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
+        }
+    } {
+        Ok(_) => {
+            context.insert("login_successful", &true);
+        }
+        Err(_) => {
+            context.insert("login_successful", &false);
+        }
+    }
+
+    match TERA.render("login_complete.html", &context) {
+        Ok(r) => Ok(HttpResponse::Ok().body(r)),
+        Err(e) => Err(actix_web::error::ErrorInternalServerError(e))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct OauthState {
+    id: uuid::Uuid,
+    redirect_uri: String,
+    next_uri: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OauthLoginInfo {
+    next: Option<String>,
+}
+
+
+#[derive(Deserialize)]
+struct OauthCallbackInfo {
+    state: uuid::Uuid,
+    code: String,
+    error: Option<String>,
+}
+
+async fn start_login(req: HttpRequest, data: web::Data<AppState>, info: web::Query<OauthLoginInfo>, session: actix_session::Session) -> actix_web::Result<impl actix_web::Responder> {
+    let redirect_uri = format!("https://{}/login/redirect/", req.connection_info().host());
+
+    let state = OauthState {
+        id: uuid::Uuid::new_v4(),
+        redirect_uri: redirect_uri.clone(),
+        next_uri: info.next.clone(),
+    };
+
+    let id_str = state.id.to_string();
+
+    let url = data.oauth.authorization_url(&[
+        "openid",
+        "email",
+        "profile"
+    ], "code", Some(&id_str), Some(&redirect_uri)).await?;
+
+    match session.set("login_state", state) {
+        Ok(s) => s,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    };
+
+    Ok(
+        HttpResponse::Found()
+            .header(actix_web::http::header::LOCATION, url)
+            .finish()
+    )
+}
+
+async fn login_callback(data: web::Data<AppState>, info: web::Query<OauthCallbackInfo>, session: actix_session::Session) -> actix_web::Result<impl actix_web::Responder> {
+    let state = match match session.get::<OauthState>("login_state") {
+        Ok(s) => s,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Some(s) => s,
+        None => return Err(actix_web::error::ErrorInternalServerError(""))
+    };
+
+    if Option::is_none(&info.error) && state.id == info.state {
+        let oauth_token = data.oauth.token_exchange(&info.code, Some(&state.redirect_uri)).await?;
+
+        match session.set("oauth_token", oauth_token) {
+            Ok(s) => s,
+            Err(_) => {}
+        };
+    }
+
+    let mut resp = HttpResponse::Found();
+    if let Some(next) = state.next_uri {
+        resp.header(actix_web::http::header::LOCATION, next);
+    } else {
+        resp.header(actix_web::http::header::LOCATION, "/");
+    }
+    Ok(resp.finish())
 }
 
 fn main() {
@@ -939,13 +1105,24 @@ fn main() {
 
     let oauth_client = oauth_client();
     let keycloak_client = keycloak_client();
+    let mail_client = mail_client();
     let worldpay_config = worldpay_config();
+    let amqp_client = amqp_client();
+
+    let jobs_data = jobs::JobsState {
+        db: db_addr.clone(),
+        keycloak: keycloak_client.clone(),
+        oauth: oauth_client.clone(),
+        mail_client,
+        amqp: Arc::new(Mutex::new(amqp_client)),
+    };
 
     let data = AppState {
         oauth: oauth_client,
         keycloak: keycloak_client,
         worldpay: worldpay_config,
         db: db_addr,
+        jobs_state: jobs_data,
     };
 
     let mut server = HttpServer::new(move || {
@@ -960,24 +1137,27 @@ fn main() {
                 "/static",
                 generated,
             ))
-            .route("/payment/new/", web::post().to_async(new_payment))
+            .route("/login/auth/", web::get().to_async(actix_web_async_await::compat4(start_login)))
+            .route("/login/redirect/", web::get().to_async(actix_web_async_await::compat3(login_callback)))
+            .route("/payment/new/", web::post().to_async(actix_web_async_await::compat3(new_payment)))
+            .route("/payment/login-complete/", web::get().to_async(actix_web_async_await::compat2(render_login_complete)))
             .service(
                 web::resource("/payment/{payment_id}/")
                     .wrap(Cors::new()
                         .supports_credentials())
-                    .route(web::get().to_async(get_payment))
+                    .route(web::get().to_async(actix_web_async_await::compat3(get_payment)))
             )
             .service(
                 web::resource("/payment/worldpay/{payment_id}/")
                     .wrap(Cors::new()
                         .supports_credentials())
-                    .route(web::post().to_async(process_worldpay_payment))
+                    .route(web::post().to_async(actix_web_async_await::compat5(process_worldpay_payment)))
             )
-            .route("/payment/3ds/{payment_id}/", web::get().to_async(render_3ds_form))
-            .route("/payment/3ds-complete/{payment_id}/", web::post().to_async(render_3ds_complete))
+            .route("/payment/3ds/{payment_id}/", web::get().to_async(actix_web_async_await::compat3(render_3ds_form)))
+            .route("/payment/3ds-complete/{payment_id}/", web::post().to_async(actix_web_async_await::compat5(render_3ds_complete)))
             .service(web::resource("/payment/fb/{payment_id}/")
-                .route(web::get().to_async(render_fb_payment_get))
-                .route(web::post().to_async(render_fb_payment_post)))
+                .route(web::get().to_async(actix_web_async_await::compat3(render_fb_payment_get)))
+                .route(web::post().to_async(actix_web_async_await::compat4(render_fb_payment_post))))
     });
 
     let mut listenfd = listenfd::ListenFd::from_env();

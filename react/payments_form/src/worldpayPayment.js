@@ -19,7 +19,7 @@ const basicCardInstrument = {
 
 
 const masterPassTestId = "5dc2ffcbc3154881a9f4a5f63c9ab2b1";
-const masterPassTestUrl = "https://wewillfixyourpc-bot.eu.ngrok.io/payment/masterpass-test/";
+const masterPassTestUrl = "https://wwfypc-payments.eu.ngrok.io/payment/masterpass-test/";
 
 const worldPayTestKey = "T_C_52bc5b16-562d-4198-95d4-00b91f30fe2c";
 const worldPayLiveKey = "L_C_4a900284-cafb-41fd-a544-8478429f539b";
@@ -38,7 +38,7 @@ const liveTokenizationSpecification = {
     type: 'DIRECT',
     parameters: {
         protocolVersion: "ECv2",
-        publicKey: ""
+        publicKey: "BKDMhwsOHzdKPXiMrjj/vHCYiB3bQQmmNN1ENAmnmfNa/7LIEbT5ko63bLK1LmczU5L3iPrVDVtgfIgNbkOoGao="
     }
 };
 
@@ -101,6 +101,8 @@ export default class WorldpayPayment extends Component {
             err: null,
             selectedMethod: null,
             threedsData: null,
+            accountData: null,
+            popupWindow: null,
             loading: false,
             complete: false,
             canUsePaymentRequests: null,
@@ -128,13 +130,20 @@ export default class WorldpayPayment extends Component {
         this.handlePaymentRequest = this.handlePaymentRequest.bind(this);
         this.handleMessage = this.handleMessage.bind(this);
         this.handleTryAgain = this.handleTryAgain.bind(this);
+        this.openLoginPopup = this.openLoginPopup.bind(this);
     }
 
     updatePayment() {
+        if (this.state.popupWindow) {
+            this.state.popupWindow.close();
+        }
+
         this.setState({
             payment: null,
             selectedMethod: null,
             threedsData: null,
+            accountData: null,
+            popupWindow: null,
             complete: false,
             loading: false,
             canUsePaymentRequests: null,
@@ -159,9 +168,10 @@ export default class WorldpayPayment extends Component {
                 paymentsClient.isReadyToPay(isReadyToPayRequest)
                     .then(resp => {
                         if (resp.result) {
-                            // this.setState({
-                            //     isGooglePayReady: true
-                            // });
+                            this.setState({
+                                isGooglePayReady: true
+                            });
+                            console.log(this.googlePaymentRequest());
                             paymentsClient.prefetchPaymentData(this.googlePaymentRequest());
                         } else {
                             this.setState({
@@ -171,7 +181,7 @@ export default class WorldpayPayment extends Component {
                     })
                     .catch(err => this.handleError(err));
                 this.setState({
-                    isGooglePayReady: false,
+                    // isGooglePayReady: false,
                     canUseMasterpass: false,
                 });
             } else {
@@ -361,22 +371,30 @@ export default class WorldpayPayment extends Component {
     }
 
     googlePaymentRequest() {
+        let paymentDataRequest = null;
         if (this.state.payment.environment === "TEST") {
-            const paymentDataRequest = Object.assign({}, googlePaymentTestBaseRequest);
+            paymentDataRequest = Object.assign({}, googlePaymentTestBaseRequest);
             paymentDataRequest.allowedPaymentMethods = [
                 Object.assign({tokenizationSpecification: testTokenizationSpecification},
                     googlePayBaseCardPaymentMethod)
             ];
-            paymentDataRequest.transactionInfo = {
-                totalPriceStatus: 'FINAL',
-                totalPrice: this.paymentTotal().toString(),
-                currencyCode: 'GBP'
-            };
-            if (this.state.payment.customer === null) {
-                paymentDataRequest.emailRequired = true;
-            }
-            return paymentDataRequest;
+        } else {
+            paymentDataRequest = Object.assign({}, googlePaymentLiveBaseRequest);
+            paymentDataRequest.allowedPaymentMethods = [
+                Object.assign({tokenizationSpecification: liveTokenizationSpecification},
+                    googlePayBaseCardPaymentMethod)
+            ];
         }
+        paymentDataRequest.transactionInfo = {
+            totalPriceStatus: 'FINAL',
+            totalPrice: this.paymentTotal().toString(),
+            countryCode: "GB",
+            currencyCode: 'GBP'
+        };
+        if (this.state.payment.customer === null) {
+            paymentDataRequest.emailRequired = true;
+        }
+        return paymentDataRequest;
     }
 
     makeGooglePayment() {
@@ -392,6 +410,7 @@ export default class WorldpayPayment extends Component {
                 complete: () => Promise.resolve(true)
             });
         }).catch((err) => {
+            console.log(err);
             if (err.statusCode !== "CANCELED") {
                 this.handleError(err);
             }
@@ -493,6 +512,17 @@ export default class WorldpayPayment extends Component {
                             });
                         })
                         .catch(err => this.handleError(err))
+                } else if (resp.state === "EXISTING_ACCOUNT") {
+                    res.complete('success')
+                        .then(() => {
+                            this.setState({
+                                accountData: {
+                                    resp: resp,
+                                    data: data,
+                                }
+                            });
+                        })
+                        .catch(err => this.handleError(err))
                 } else if (resp.state === "FAILED") {
                     res.complete('fail')
                         .then(() => {
@@ -560,17 +590,39 @@ export default class WorldpayPayment extends Component {
     }
 
     handleMessage(event) {
-        if (this.state.threedsData !== null) {
-            if (event.data.type !== "3DS") {
-                return;
+        if (event.data.type === "3DS") {
+            if (this.state.threedsData !== null) {
+                if (event.data.payment_id !== this.state.payment.id) {
+                    this.handleError();
+                }
+                if (event.data.threeds_approved) {
+                    this.onComplete();
+                } else {
+                    this.handleError(null, "Payment failed");
+                }
             }
-            if (event.data.payment_id !== this.state.payment.id) {
-                this.handleError();
-            }
-            if (event.data.threeds_approved) {
-                this.onComplete();
-            } else {
-                this.handleError(null, "Payment failed");
+        } else if (event.data.type === "login") {
+            if (this.state.accountData !== null) {
+                if (!event.data.login_successful) {
+                    this.handleError(null, "Login failed");
+                } else {
+                    if (this.state.popupWindow) {
+                        this.state.popupWindow.close();
+                    }
+                    const data = this.state.accountData.data;
+
+                    this.setState({
+                        loading: true,
+                        accountData: null,
+                    });
+
+                    this.takePayment({
+                        payerPhone: data.phone,
+                        payerEmail: data.email,
+                        payerName: data.payerName,
+                        complete: () => Promise.resolve({})
+                    }, data)
+                }
             }
         }
     }
@@ -581,6 +633,18 @@ export default class WorldpayPayment extends Component {
             err: null
         });
         this.updatePayment();
+    }
+
+    openLoginPopup() {
+        const win = window.open(
+            this.state.accountData.resp.frame,
+            'login',
+            'status=no,location=no,toolbar=no,menubar=no'
+        );
+
+        this.setState({
+            popupWindow: win
+        });
     }
 
     render() {
@@ -601,6 +665,13 @@ export default class WorldpayPayment extends Component {
             return <SVG src={loader} className="loader"/>
         } else if (this.state.threedsData !== null) {
             return <iframe src={this.state.threedsData.frame} width={390} height={400}/>
+        } else if (this.state.accountData !== null) {
+            return <React.Fragment>
+                <h3>An account already exists with that email, please login to continue</h3>
+                <div className="buttons">
+                    <button onClick={this.openLoginPopup}>Login</button>
+                </div>
+            </React.Fragment>;
         } else {
             if (this.state.selectedMethod !== "form" && (this.state.isGooglePayReady || this.state.canUsePaymentRequest || this.state.canUseMasterpass)) {
                 return <div className="buttons">

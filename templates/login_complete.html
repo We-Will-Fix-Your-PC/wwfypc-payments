@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Login</title>
+</head>
+<body>
+<script>
+    window.onload = function () {
+        window.opener.postMessage({
+            type: "login",
+            login_successful: {% if login_successful %}true{% else %}false{% endif %}
+        }, "*")
+    }
+</script>
+</body>
+</html>

@@ -343,7 +343,7 @@ impl Message for GetPaymentTokens {
 impl Handler<GetPaymentTokens> for DbExecutor {
     type Result = Result<Vec<models::PaymentToken>, diesel::result::Error>;
 
-    fn handle(&mut self, msg: GetPaymentTokens, _: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, _msg: GetPaymentTokens, _: &mut Self::Context) -> Self::Result {
         schema::payment_tokens::table.load::<models::PaymentToken>(&self.0)
     }
 }
