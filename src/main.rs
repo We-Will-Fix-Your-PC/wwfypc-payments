@@ -2,21 +2,38 @@
 #[macro_use]
 extern crate diesel;
 #[macro_use]
-extern crate diesel_migrations;
+extern crate diesel_derive_enum;
 #[macro_use]
 extern crate diesel_derives;
 #[macro_use]
-extern crate log;
+extern crate diesel_migrations;
+#[macro_use]
+extern crate failure;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
-extern crate tera;
+extern crate log;
 #[macro_use]
 extern crate serde;
 #[macro_use]
-extern crate diesel_derive_enum;
-#[macro_use]
-extern crate failure;
+extern crate tera;
+
+use actix::prelude::*;
+use actix_cors::Cors;
+use actix_redis::RedisSession;
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, middleware, web};
+use chrono::prelude::*;
+use crypto::mac::Mac;
+use diesel::pg::PgConnection;
+use diesel::prelude::*;
+use futures::compat::Future01CompatExt;
+use tera::Tera;
+
+use dotenv::dotenv;
+use std::collections::HashMap;
+use std::env;
+use std::sync::{Arc, Mutex, RwLock};
+use std::io::Read;
 
 pub mod schema;
 pub mod models;
@@ -25,21 +42,7 @@ pub mod keycloak;
 pub mod db;
 pub mod util;
 pub mod jobs;
-
-use actix::prelude::*;
-use actix_cors::Cors;
-use diesel::prelude::*;
-use diesel::pg::PgConnection;
-use dotenv::dotenv;
-use std::env;
-use actix_web::{web, middleware, App, HttpServer, HttpRequest, HttpResponse};
-use tera::Tera;
-use chrono::prelude::*;
-use std::collections::HashMap;
-use crypto::mac::Mac;
-use futures::compat::Future01CompatExt;
-use actix_redis::RedisSession;
-use std::sync::{Arc, Mutex};
+pub mod apple_pay;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
@@ -143,6 +146,24 @@ fn amqp_client() -> amqp::Channel {
     channel
 }
 
+fn apple_pay_identity() -> reqwest::r#async::Client {
+    dotenv().ok();
+    let cert_path = env::var("APPLE_PAY_IDENTITY")
+        .expect("APPLE_PAY_IDENTITY must be set");
+
+    let mut buf = Vec::new();
+
+    std::fs::File::open(cert_path).expect("Unable to open apple pay identity certificate")
+        .read_to_end(&mut buf).expect("Unable to read apple pay identity certificate");
+
+    let identity = reqwest::Identity::from_pkcs12_der(&buf, "").expect("Unable to decode apple pay identity certificate");
+
+    reqwest::r#async::ClientBuilder::new()
+        .identity(identity)
+        .build()
+        .expect("Unable to create apple pay client")
+}
+
 #[derive(Clone)]
 struct WorldpayConfig {
     test_key: String,
@@ -154,6 +175,7 @@ pub struct AppState {
     oauth: oauth::OAuthClient,
     keycloak: keycloak::KeycloakClient,
     worldpay: WorldpayConfig,
+    apple_pay_client: reqwest::r#async::Client,
     db: Addr<db::DbExecutor>,
     jobs_state: jobs::JobsState,
 }
@@ -1121,6 +1143,7 @@ fn main() {
         oauth: oauth_client,
         keycloak: keycloak_client,
         worldpay: worldpay_config,
+        apple_pay_client: apple_pay_identity(),
         db: db_addr,
         jobs_state: jobs_data,
     };
@@ -1137,8 +1160,11 @@ fn main() {
                 "/static",
                 generated,
             ))
+            .route(".well-known/apple-developer-merchantid-domain-association.txt", web::get().to(|| HttpResponse::Ok().body(
+                actix_web::dev::Body::from_slice(include_bytes!("../apple-developer-merchantid-domain-association.txt")))))
             .route("/login/auth/", web::get().to_async(actix_web_async_await::compat4(start_login)))
             .route("/login/redirect/", web::get().to_async(actix_web_async_await::compat3(login_callback)))
+            .route("/apple-merchant-verification/", web::post().to_async(actix_web_async_await::compat3(apple_pay::merchant_verification)))
             .route("/payment/new/", web::post().to_async(actix_web_async_await::compat3(new_payment)))
             .route("/payment/login-complete/", web::get().to_async(actix_web_async_await::compat2(render_login_complete)))
             .service(

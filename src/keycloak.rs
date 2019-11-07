@@ -23,7 +23,6 @@ pub struct KeycloakClient {
     client: reqwest::r#async::Client,
 }
 
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct User {
     pub id: uuid::Uuid,

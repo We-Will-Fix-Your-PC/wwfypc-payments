@@ -121,3 +121,5 @@ fabric.properties
 *.css.map
 *.sass.map
 *.scss.map
+
+secrets/
