@@ -1,9 +1,7 @@
 use lettre_email::Email;
 use lettre::Transport;
 use chrono::prelude::*;
-use futures::compat::Future01CompatExt;
-use futures01::future::{Future, ok, err, Either};
-use futures::{FutureExt, TryFutureExt};
+use futures01::future::{Future, ok, err};
 use failure::{Error, Fallible};
 use std::sync::{Arc, Mutex};
 use crate::db;

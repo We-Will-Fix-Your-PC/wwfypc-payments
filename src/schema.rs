@@ -1,8 +1,11 @@
 table! {
-    card_tokens (id) {
-        id -> Int8,
+    cards (id) {
+        id -> Uuid,
         customer_id -> Uuid,
-        token -> Text,
+        pan -> Varchar,
+        exp_month -> Int4,
+        exp_year -> Int4,
+        name_on_card -> Varchar,
     }
 }
 
@@ -52,7 +55,7 @@ joinable!(payment_items -> payments (payment_id));
 joinable!(threeds_datas -> payments (payment_id));
 
 allow_tables_to_appear_in_same_query!(
-    card_tokens,
+    cards,
     payment_items,
     payments,
     payment_tokens,

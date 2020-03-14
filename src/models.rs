@@ -1,6 +1,6 @@
 use uuid::Uuid;
 use std::fmt;
-use super::schema::{payments, payment_items, threeds_datas, card_tokens, payment_tokens};
+use super::schema::{payments, payment_items, threeds_datas, cards, payment_tokens};
 use chrono::prelude::*;
 use diesel::data_types::PgMoney as Pence;
 
@@ -92,17 +92,23 @@ pub struct NewThreedsData<'a> {
 }
 
 #[derive(Queryable, Identifiable, AsChangeset, Clone, Debug, PartialEq)]
-pub struct CardToken {
-    pub id: i64,
+pub struct Card {
+    pub id: Uuid,
     pub customer_id: Uuid,
-    pub token: String,
+    pub pan: String,
+    pub exp_month: i32,
+    pub exp_year: i32,
+    pub name_on_card: String,
 }
 
 #[derive(Clone, Debug, Insertable)]
-#[table_name="card_tokens"]
-pub struct NewCardToken<'a> {
+#[table_name="cards"]
+pub struct NewCard<'a> {
     pub customer_id: &'a Uuid,
-    pub token: &'a str,
+    pub pan: &'a str,
+    pub exp_month: i32,
+    pub exp_year: i32,
+    pub name_on_card: &'a str,
 }
 
 #[derive(Queryable, Identifiable, AsChangeset, Clone, Debug, PartialEq)]

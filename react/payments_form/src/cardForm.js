@@ -1,35 +1,52 @@
 import React, {Component} from 'react';
-import {FontAwesomeIcon} from '@fortawesome/react-fontawesome'
-import {faCcVisa, faCcMastercard, faCcAmex} from '@fortawesome/free-brands-svg-icons'
+import {faCcVisa, faCcMastercard, faCcAmex} from '@fortawesome/free-brands-svg-icons';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import Payment from 'payment';
+
+const brands = {
+    "amex": {
+        colour: "#108168",
+        icon: faCcAmex
+    },
+    "visa": {
+        colour: "#191278",
+        icon: faCcVisa
+    },
+    "mastercard": {
+        colour: "#ff5f00",
+        icon: faCcMastercard
+    },
+    "monzo": {
+        colour: "#ff4d56",
+        icon: faCcMastercard
+    }
+};
 
 export default class CardForm extends Component {
     constructor(props) {
         super(props);
 
         this.state = {
-            card_type: null
+            card_type: null,
+            card_number: "",
+            card_display_number: "•••• •••• •••• ••••",
+            card_name: "",
+            card_display_name: "NAME",
+            card_expiry: "",
+            card_display_expiry: "Expiry: •• / ••",
+            card_cvc: "",
+            card_display_cvc: "•••",
+            name_focused: false,
+            number_focused: false,
+            expiry_focused: false,
+            cvc_focused: false,
         };
 
-        this.setCardType = this.setCardType.bind(this);
+        this.updateCardName = this.updateCardName.bind(this);
+        this.updateCardNumber = this.updateCardNumber.bind(this);
+        this.updateCardExpiry = this.updateCardExpiry.bind(this);
+        this.updateCardCvc = this.updateCardCvc.bind(this);
         this.handleSubmit = this.handleSubmit.bind(this);
-    }
-
-    renderCardList() {
-        return <div className="card-list">
-            <FontAwesomeIcon icon={faCcVisa} size="3x"
-                             className={this.state.card_type === "visa" ? "active" : ""}/>
-            <FontAwesomeIcon icon={faCcAmex} size="3x"
-                             className={this.state.card_type === "amex" ? "active" : ""}/>
-            <FontAwesomeIcon icon={faCcMastercard} size="3x"
-                             className={this.state.card_type === "mastercard" ? "active" : ""}/>
-        </div>;
-    }
-
-    componentDidMount() {
-        const {number, cvc} = this.refs;
-        Payment.formatCardNumber(number);
-        Payment.formatCardCVC(cvc);
     }
 
     setCardType(event) {
@@ -82,34 +99,224 @@ export default class CardForm extends Component {
         this.props.onSubmit(paymentResponse);
     }
 
-    render() {
-        let curYear = new Date().getFullYear();
-        let hasPhone = false;
-        if (this.props.payment.customer) {
-            if (this.props.payment.customer.phone) {
-                hasPhone = true;
+    updateCardName(e) {
+        let new_val = e.target.value;
+        let new_display_val = new_val;
+        if (new_display_val.length === 0) {
+            new_display_val = "NAME"
+        }
+        if (!new_val.length) {
+            this.refs.number.setCustomValidity("Enter a name");
+        } else {
+            this.refs.number.setCustomValidity("");
+        }
+        this.setState({
+            card_name: new_val,
+            card_display_name: new_display_val
+        })
+    }
+
+    updateCardNumber(e) {
+        let new_val = e.target.value;
+        new_val = new_val.replace(/[^0-9]+/g, "");
+        if (new_val.length > 16) {
+            new_val = new_val.slice(0, 16)
+        }
+        let new_display_val = new_val;
+        while (new_display_val.length !== 16) {
+            new_display_val += "•";
+        }
+        let r = (cur, next, i) => {
+            cur += next;
+            if (i % 4 === 3) {
+                cur += " ";
+            }
+            return cur;
+        };
+        new_display_val = new_display_val.split("").reduce(r, "");
+        let type = Payment.fns.cardType(new_val);
+        if (type && !brands[type]) {
+            this.refs.number.setCustomValidity("Unsupported card type");
+            return
+        } else if (!Payment.fns.validateCardNumber(new_val)) {
+            this.refs.number.setCustomValidity("Invalid card number");
+        } else {
+            this.refs.number.setCustomValidity("");
+        }
+        if (new_val.startsWith("535522")) {
+            type = "monzo";
+        }
+        this.setState({
+            card_type: type,
+            card_number: new_val,
+            card_display_number: new_display_val
+        })
+    }
+
+    updateCardExpiry(e) {
+        let new_val = e.target.value;
+        new_val = new_val.replace(/[^0-9/]+/g, "");
+        let parts = new_val.split("/");
+        if (parts.length > 2) {
+            parts = parts.slice(0, 2)
+        }
+        let had_slash = parts.length >= 2;
+        let had_long_year = false;
+        let month = null;
+        let year = null;
+        if (parts[0].trim().length > 0) {
+            month = parts[0].trim();
+            if (month.length > 2) {
+                month = month.slice(0, 2);
+            }
+            month = parseInt(month);
+            if (month > 12) {
+                month = 12;
+            }
+            if (parts.length > 1 && parts[1].trim().length > 0) {
+                year = parts[1].trim();
+                if (year.length > 4) {
+                    year = year.slice(0, 4);
+                }
+                if (year.length > 2) {
+                    had_long_year = true;
+                }
+                if (year.length === 2) {
+                    year = (Math.floor(new Date().getFullYear() / 1000) * 1000) + parseInt(year);
+                } else {
+                    year = parseInt(year)
+                }
             }
         }
+        new_val = "";
+        let new_display_val = "Expiry: ";
+        if (month !== null) {
+            new_val = month.toString();
+            new_display_val += new_val.padStart(2, "0") + " / ";
+            if (had_slash) {
+                new_val += "/";
+            }
+            if (year !== null) {
+                if (!had_slash) {
+                    new_val += "/";
+                }
+                if (had_long_year) {
+                    new_val += year.toString();
+                } else {
+                    new_val += (year % 1000).toString();
+                }
+                new_display_val += (year % 1000).toString().padStart(2, "0");
+                let a = new Date();
+                if (year < a.getFullYear() || (year === a.getFullYear() && month <= a.getMonth())) {
+                    this.refs.expiry.setCustomValidity("Date is in the past");
+                } else {
+                    this.refs.expiry.setCustomValidity("");
+                }
+            } else {
+                new_display_val += "••";
+                this.refs.expiry.setCustomValidity("Enter a year");
+            }
+        } else {
+            new_display_val += "•• / ••";
+            this.refs.expiry.setCustomValidity("Enter expiry");
+        }
+        this.setState({
+            card_expiry: new_val,
+            card_display_expiry: new_display_val
+        })
+    }
+
+    updateCardCvc(e) {
+        let new_val = e.target.value;
+        new_val = new_val.replace(/[^0-9]+/g, "");
+        let wanted_len = 3;
+        if (this.state.card_type === "amex") {
+            wanted_len = 4;
+        }
+        if (new_val.length > wanted_len) {
+            new_val = new_val.slice(0, wanted_len)
+        }
+        let new_display_val = new_val;
+        while (new_display_val.length !== wanted_len) {
+            new_display_val += "•";
+        }
+        if (new_val.length !== wanted_len) {
+            this.refs.cvc.setCustomValidity("Invalid CVC");
+        } else {
+            this.refs.cvc.setCustomValidity("");
+        }
+        this.setState({
+            card_cvc: new_val,
+            card_display_cvc: new_display_val
+        })
+    }
+
+    render() {
+        // let curYear = new Date().getFullYear();
+        // let hasPhone = false;
+        // if (this.props.payment.customer) {
+        //     if (this.props.payment.customer.phone) {
+        //         hasPhone = true;
+        //     }
+        // }
+
         return <div className="CardForm">
-            {this.renderCardList()}
             <form onSubmit={this.handleSubmit}>
-                <input className="card-name" type="text" ref="name" placeholder="Name on card" required/>
-                <input className="card-number" type="text" ref="number" placeholder="Card number" required
-                       pattern="[0-9 ]*" onKeyUp={this.setCardType}/>
-                <select className="exp-month" ref="month" required>
-                    <option value="">Exp month</option>
-                    {[...Array(12).keys()].map(i => <option key={i} value={i + 1}>{i + 1}</option>)}
-                </select>
-                <select className="exp-year" ref="year" required>
-                    <option value="">Exp year</option>
-                    {[...Array(10).keys()].map(i => <option key={i} value={i + curYear}>{i + curYear}</option>)}
-                </select>
-                <input className="cvc" type="text" ref="cvc" placeholder="CVC" maxLength={4} required
-                       pattern="[0-9]*"/>
-                {(!hasPhone) ?
+                {(this.props.paymentOptions.requestPayerPhone) ?
                     <input className="phone" type="tel" ref="phone" placeholder="Phone number" required/> : null}
                 {(this.props.paymentOptions.requestPayerEmail) ?
                     <input className="email" type="email" ref="email" placeholder="Email address" required/> : null}
+                <div className="disp-card">
+                    <div className={"disp-card-inner " + this.state.card_type + (this.state.cvc_focused ? " flip" : "")}>
+                        <div className="disp-card-front" style={this.state.card_type ? {
+                            backgroundColor: brands[this.state.card_type].colour
+                        } : {}}>
+                            {this.state.card_type ? <FontAwesomeIcon icon={brands[this.state.card_type].icon} size="3x" className="brand-icon"/> : null }
+                            <div className="disp-card-pads"/>
+                            <div className={"disp-card-number" + (this.state.number_focused ? " focus": "")}>
+                                {this.state.card_display_number}
+                            </div>
+                            <div className={"disp-card-name" + (this.state.name_focused ? " focus": "")}>
+                                {this.state.card_display_name}
+                            </div>
+                            <div className={"disp-card-expiry" + (this.state.expiry_focused ? " focus": "")}>
+                                {this.state.card_display_expiry}
+                            </div>
+                            <div className={"disp-card-cvc" + (this.state.cvc_focused ? " focus": "")}>
+                                {this.state.card_display_cvc}
+                            </div>
+                        </div>
+                        <div className="disp-card-back" style={this.state.card_type ? {
+                            backgroundColor: brands[this.state.card_type].colour
+                        } : {}}>
+                            <div className="disp-card-magstripe" />
+                            <div className="disp-card-signature" />
+                            <div className={"disp-card-cvc" + (this.state.cvc_focused ? " focus": "")}>
+                                {this.state.card_display_cvc}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <input className="card-name" type="text" ref="name" placeholder="Name on card" required
+                       autoComplete="cc-name"
+                       value={this.state.card_name} onChange={this.updateCardName}
+                       onFocus={() => this.setState({name_focused: true})}
+                       onBlur={() => this.setState({name_focused: false})}/>
+                <input className="card-number" type="text" ref="number" placeholder="Card number" required
+                       autoComplete="cc-number" inputMode="numeric"
+                       pattern="[0-9]*" onChange={this.updateCardNumber} maxLength={16}
+                       value={this.state.card_number} onFocus={() => this.setState({number_focused: true})}
+                       onBlur={() => this.setState({number_focused: false})}/>
+                <input className="card-expiry" type="text" ref="expiry" placeholder="MM / YY" required
+                       pattern="[0-9/]*" autoComplete="cc-exp"
+                       value={this.state.card_expiry} onChange={this.updateCardExpiry}
+                       onFocus={() => this.setState({expiry_focused: true})}
+                       onBlur={() => this.setState({expiry_focused: false})}/>
+                <input className="card-cvc" type="text" ref="cvc" placeholder="CVC" maxLength={4} required
+                       pattern="[0-9]*" autoComplete="cc-csc" inputMode="numeric"
+                       value={this.state.card_cvc} onChange={this.updateCardCvc}
+                       onFocus={() => this.setState({cvc_focused: true})}
+                       onBlur={() => this.setState({cvc_focused: false})}/>
                 <button type="submit">Submit</button>
             </form>
         </div>;

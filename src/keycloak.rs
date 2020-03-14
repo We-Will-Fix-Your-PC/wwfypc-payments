@@ -1,7 +1,8 @@
 use rand::prelude::*;
 use std::collections::HashMap;
 use futures::compat::Future01CompatExt;
-use failure::{Error, Fallible};
+use failure::Fallible;
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug)]
 pub struct KeycloakClientConfig {
@@ -21,6 +22,8 @@ impl KeycloakClientConfig {
 pub struct KeycloakClient {
     config: KeycloakClientConfig,
     client: reqwest::r#async::Client,
+    _user_cache: Arc<RwLock<HashMap<uuid::Uuid, (u64, User)>>>,
+    _user_email_cache: Arc<RwLock<HashMap<String, (u64, uuid::Uuid)>>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -195,10 +198,21 @@ impl KeycloakClient {
                 .default_headers(d_headers)
                 .build()
                 .unwrap(),
+            _user_cache: Arc::new(RwLock::new(HashMap::new())),
+            _user_email_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub async fn get_user(&self, user_id: uuid::Uuid, token: &str) -> Fallible<User> {
+        let since_the_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards").as_secs().to_owned();
+
+        if let Some((insert_time, user)) = self._user_cache.read().unwrap().get(&user_id) {
+            if insert_time.to_owned() > (since_the_epoch - 60) {
+                return Ok(user.clone())
+            }
+        }
+
         let u = self.config.base_url.join(&format!("users/{}", user_id.to_string()))?;
 
         let mut c = crate::util::async_reqwest_to_error(
@@ -207,6 +221,8 @@ impl KeycloakClient {
                 .bearer_auth(token)
         ).await?;
         let mut u = c.json::<User>().compat().await?;
+
+        self._user_cache.write().unwrap().insert(user_id.clone(), (since_the_epoch, u.clone()));
 
         u._client = Some(self.clone());
         Ok(u)
@@ -241,11 +257,22 @@ impl KeycloakClient {
     }
 
     pub async fn get_user_by_email(&self, check_email: &str, token: &str) -> actix_web::Result<Option<User>> {
+        let since_the_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards").as_secs().to_owned();
+
+        if let Some((insert_time, user_id)) = self._user_email_cache.read().unwrap().get(check_email) {
+            if insert_time.to_owned() > (since_the_epoch - 60) {
+                return Ok(Some(self.get_user(*user_id, token).await?))
+            }
+        }
+
         let users = self.get_users(token).await?;
 
         for user in users {
             if let Some(email) = &user.email {
                 if email == check_email {
+                    self._user_email_cache.write().unwrap().insert(check_email.to_string(), (since_the_epoch, user.id.clone()));
+
                     return Ok(Some(user));
                 }
             }

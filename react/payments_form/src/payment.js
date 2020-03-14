@@ -15,17 +15,17 @@ window.addEventListener("onload", () => {
     Sentry.init({dsn: "https://3407347031614995bc8207f089a10f92@sentry.io/1518060"});
 });
 
-window.makePaymentForm = (container, payment_id, on_complete, accepts_header, state) => {
+window.makePaymentForm = (container, payment_id, on_complete, accepts_header) => {
     if (payment_provider === "WORLDPAY") {
         ReactDOM.render(<WorldpayPayment acceptsHeader={accepts_header} paymentId={payment_id}
-                                         onComplete={on_complete} state={state} />, container);
+                                         onComplete={on_complete} />, container);
     } else if (payment_provider === "STRIPE") {
-        ReactDOM.render(<StripePayment paymentId={payment_id} onComplete={on_complete} state={state}/>, container);
+        ReactDOM.render(<StripePayment paymentId={payment_id} onComplete={on_complete}/>, container);
     }
 };
-window.makePaymentFormFromData = (container, payment, on_complete, accepts_header, state) => {
+window.makePaymentFormFromData = (container, payment, on_complete, accepts_header) => {
     if (payment_provider === "WORLDPAY") {
         ReactDOM.render(<WorldpayPayment acceptsHeader={accepts_header} payment={payment}
-                                         onComplete={on_complete} state={state}/>, container);
+                                         onComplete={on_complete}/>, container);
     }
 };

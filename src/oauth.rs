@@ -27,6 +27,7 @@ struct OAuthWellKnown {
     authorization_endpoint: String,
     token_endpoint: Option<String>,
     introspection_endpoint: Option<String>,
+    end_session_endpoint: Option<String>,
     jwks_uri: Option<String>,
 }
 
@@ -62,7 +63,6 @@ pub struct OAuthIdToken {
     preferred_username: Option<String>,
     email: Option<String>,
     email_verified: Option<bool>,
-
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,7 +126,7 @@ pub enum VerifyTokenError {
 impl actix_web::error::ResponseError for VerifyTokenError {
     fn error_response(&self) -> actix_web::web::HttpResponse {
         match self {
-            VerifyTokenError::InternalServerError(c) => actix_web::web::HttpResponse::new(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
+            VerifyTokenError::InternalServerError(_) => actix_web::web::HttpResponse::new(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR),
             VerifyTokenError::Forbidden => actix_web::web::HttpResponse::new(actix_web::http::StatusCode::FORBIDDEN)
         }
     }
@@ -196,7 +196,7 @@ impl OAuthClient {
         }
     }
 
-    pub async fn authorization_url(&self, scopes: &[&str], response_type: &str, state: Option<&str>, redirect_url: Option<&str>) -> Result<String, Error> {
+    pub async fn authorization_url(&self, scopes: &[&str], response_type: &str, state: Option<&str>, redirect_url: Option<&str>, additional: Option<&[(&str, &str)]>) -> Result<String, Error> {
         let well_known = self.well_known().await?;
 
         let scopes = scopes.join(" ");
@@ -217,6 +217,36 @@ impl OAuthClient {
         }
 
         let mut url = reqwest::Url::parse(&well_known.authorization_endpoint)?;
+
+        url.query_pairs_mut().extend_pairs(
+            pairs.iter().map(|(k, v)| { (k, &v[..]) })
+        );
+        if let Some(additional) = additional {
+            url.query_pairs_mut().extend_pairs(
+                additional.iter().map(|(k, v)| { (k, &v[..]) })
+            );
+        }
+
+        Ok(url.to_string())
+    }
+
+    pub async fn logout_url(&self, id_token: Option<&str>, redirect_url: Option<&str>) -> Result<String, Error> {
+        let well_known = self.well_known().await?;
+
+
+        let mut pairs = vec![];
+
+        if let Some(ref id_token) = id_token {
+            pairs.push(("id_token_hint", id_token));
+        }
+        if let Some(ref redirect_url) = redirect_url {
+            pairs.push(("post_logout_redirect_uri", redirect_url));
+        }
+
+        let mut url = match &well_known.end_session_endpoint {
+            Some(u) => reqwest::Url::parse(u)?,
+            None => return Err(failure::err_msg("no end session endpoint"))
+        };
 
         url.query_pairs_mut().extend_pairs(
             pairs.iter().map(|(k, v)| { (k, &v[..]) })
@@ -499,6 +529,20 @@ impl BearerAuthToken {
     }
 }
 
+#[derive(Debug)]
+pub struct OptionalBearerAuthToken {
+    token: Option<String>
+}
+
+impl OptionalBearerAuthToken {
+    pub fn token(&self) -> Option<&str> {
+        match &self.token {
+            Some(t) => Some(&t),
+            None => None
+        }
+    }
+}
+
 impl actix_web::FromRequest for BearerAuthToken {
     type Error = actix_web::Error;
     type Future = Result<Self, Self::Error>;
@@ -521,6 +565,38 @@ impl actix_web::FromRequest for BearerAuthToken {
             }
         } else {
             Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
+        }
+    }
+}
+
+impl actix_web::FromRequest for OptionalBearerAuthToken {
+    type Error = actix_web::Error;
+    type Future = Result<Self, Self::Error>;
+    type Config = ();
+
+    fn from_request(req: &actix_web::HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
+        let auth_header = req.headers().get(actix_web::http::header::AUTHORIZATION);
+        if let Some(auth_token) = auth_header {
+            if let Ok(auth_token_str) = auth_token.to_str() {
+                let auth_token_str = auth_token_str.trim();
+                if auth_token_str.starts_with("Bearer ") {
+                    Ok(Self {
+                        token: Some(auth_token_str[7..].to_owned())
+                    })
+                } else {
+                    Ok(Self {
+                        token: None
+                    })
+                }
+            } else {
+                Ok(Self {
+                    token: None
+                })
+            }
+        } else {
+            Ok(Self {
+                token: None
+            })
         }
     }
 }

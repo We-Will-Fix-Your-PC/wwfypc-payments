@@ -293,36 +293,55 @@ impl Handler<DeleteThreedsData> for DbExecutor {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateCardToken {
+pub struct CreateCard {
     customer_id: Uuid,
-    token: String,
+    pan: String,
+    exp_month: u32,
+    exp_year: u32,
+    name_on_card: String,
 }
 
-impl CreateCardToken {
-    pub fn new(customer_id: &Uuid, token: &str) -> Self {
+impl CreateCard {
+    pub fn new(customer_id: &Uuid, pan: &str, exp_month: u32, exp_year: u32, name_on_card: &str) -> Self {
         Self {
             customer_id: customer_id.to_owned(),
-            token: token.to_owned(),
+            pan: pan.to_string(),
+            exp_month,
+            exp_year,
+            name_on_card: name_on_card.to_string()
         }
     }
 }
 
-impl Message for CreateCardToken {
-    type Result = Result<models::CardToken, diesel::result::Error>;
+impl Message for CreateCard {
+    type Result = Result<models::Card, diesel::result::Error>;
 }
 
-impl Handler<CreateCardToken> for DbExecutor {
-    type Result = Result<models::CardToken, diesel::result::Error>;
+impl Handler<CreateCard> for DbExecutor {
+    type Result = Result<models::Card, diesel::result::Error>;
 
-    fn handle(&mut self, msg: CreateCardToken, _: &mut Self::Context) -> Self::Result {
-        let new_data = models::NewCardToken {
-            customer_id: &msg.customer_id,
-            token: &msg.token,
-        };
+    fn handle(&mut self, msg: CreateCard, _: &mut Self::Context) -> Self::Result {
+        use schema::cards::dsl::*;
+        let existing_card = cards.filter(pan.eq(&msg.pan))
+            .first::<models::Card>(&self.0);
 
-        diesel::insert_into(schema::card_tokens::table)
-            .values(&new_data)
-            .get_result(&self.0)
+        match existing_card {
+            Ok(card) => Ok(card),
+            Err(diesel::result::Error::NotFound) => {
+                let new_data = models::NewCard {
+                    customer_id: &msg.customer_id,
+                    pan: &msg.pan,
+                    exp_month: msg.exp_month as i32,
+                    exp_year: msg.exp_year as i32,
+                    name_on_card: &msg.name_on_card
+                };
+
+                diesel::insert_into(schema::cards::table)
+                    .values(&new_data)
+                    .get_result(&self.0)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

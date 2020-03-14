@@ -4,7 +4,6 @@ import uuid from "uuid";
 import * as Sentry from "@sentry/browser";
 import SVG from "react-inlinesvg";
 import loader from "./loader.svg";
-import GPayButton from "./gpayButton";
 import CardForm from "./cardForm";
 import {API_ROOT} from "./payment";
 
@@ -19,82 +18,7 @@ const basicCardInstrument = {
 
 const appleMerchantID = 'merchant.uk.cardifftec';
 const merchantName = 'We Will Fix Your PC';
-
-const masterPassTestId = "5dc2ffcbc3154881a9f4a5f63c9ab2b1";
-const masterPassTestUrl = "https://wwfypc-payments.eu.ngrok.io/payment/masterpass-test/";
-
-const worldPayTestKey = "T_C_52bc5b16-562d-4198-95d4-00b91f30fe2c";
-const worldPayLiveKey = "L_C_4a900284-cafb-41fd-a544-8478429f539b";
-
-const masterPassAllowedCardNetworks = ["master,amex,visa"];
-const allowedCardNetworks = ["AMEX", "MASTERCARD", "VISA"];
 const allowedAppleCardNetworks = ['visa', 'masterCard', 'amex'];
-const allowedCardAuthMethods = ["PAN_ONLY"];
-
-const testTokenizationSpecification = {
-    type: 'DIRECT',
-    parameters: {
-        protocolVersion: "ECv2",
-        publicKey: "BMfHP71Jz1LtG0G0rUENWmInA1+gHndceODwxKOvJvKHPOaqKWZfkJIB2Ga8fWFg4HbQC7fKju8J7x23hOEqJ74="
-    }
-};
-const liveTokenizationSpecification = {
-    type: 'DIRECT',
-    parameters: {
-        protocolVersion: "ECv2",
-        publicKey: "BKDMhwsOHzdKPXiMrjj/vHCYiB3bQQmmNN1ENAmnmfNa/7LIEbT5ko63bLK1LmczU5L3iPrVDVtgfIgNbkOoGao="
-    }
-};
-
-const googlePaymentTestBaseRequest = {
-    apiVersion: 2,
-    apiVersionMinor: 0,
-    merchantInfo: {
-        merchantName: merchantName
-    },
-};
-const googlePaymentLiveBaseRequest = {
-    apiVersion: 2,
-    apiVersionMinor: 0,
-    merchantInfo: {
-        merchantId: "00669933340577918746",
-        merchantName: merchantName,
-    },
-};
-
-const googlePayBaseCardPaymentMethod = {
-    type: 'CARD',
-    parameters: {
-        allowedAuthMethods: allowedCardAuthMethods,
-        allowedCardNetworks: allowedCardNetworks,
-        billingAddressRequired: true,
-        billingAddressParameters: {
-            format: "FULL",
-        },
-    }
-};
-
-const googlePaymentTestDataRequest = {
-    supportedMethods: 'https://google.com/pay',
-    data: Object.assign({
-        environment: 'TEST',
-        allowedPaymentMethods: [
-            Object.assign({tokenizationSpecification: testTokenizationSpecification},
-                googlePayBaseCardPaymentMethod)
-        ]
-    }, googlePaymentTestBaseRequest)
-};
-
-const googlePaymentLiveDataRequest = {
-    supportedMethods: 'https://google.com/pay',
-    data: Object.assign({
-        environment: 'PRODUCTION',
-        allowedPaymentMethods: [
-            Object.assign({tokenizationSpecification: liveTokenizationSpecification},
-                googlePayBaseCardPaymentMethod)
-        ]
-    }, googlePaymentLiveBaseRequest)
-};
 
 export default class WorldpayPayment extends Component {
     constructor(props) {
@@ -110,9 +34,6 @@ export default class WorldpayPayment extends Component {
             loading: false,
             complete: false,
             canUsePaymentRequests: null,
-            canUseMasterpass: null,
-            googlePaymentsClient: null,
-            isGooglePayReady: null,
             isApplePayReady: null,
             applePaySession: null,
         };
@@ -123,20 +44,15 @@ export default class WorldpayPayment extends Component {
         this.paymentTotal = this.paymentTotal.bind(this);
         this.paymentDetails = this.paymentDetails.bind(this);
         this.paymentOptions = this.paymentOptions.bind(this);
-        this.googlePaymentRequest = this.googlePaymentRequest.bind(this);
         this.applePaymentRequest = this.applePaymentRequest.bind(this);
         this.canUsePaymentRequests = this.canUsePaymentRequests.bind(this);
         this.makePaymentRequest = this.makePaymentRequest.bind(this);
-        this.makeGooglePayment = this.makeGooglePayment.bind(this);
         this.makeApplePayment = this.makeApplePayment.bind(this);
         this.validateApplePayment = this.validateApplePayment.bind(this);
-        this.makeMasterPassPayment = this.makeMasterPassPayment.bind(this);
         this.onFormSubmit = this.onFormSubmit.bind(this);
         this.takeBasicPayment = this.takeBasicPayment.bind(this);
-        this.takeGooglePayment = this.takeGooglePayment.bind(this);
         this.takeApplePayment = this.takeApplePayment.bind(this);
         this.takePayment = this.takePayment.bind(this);
-        this.basicCardToWorldPayToken = this.basicCardToWorldPayToken.bind(this);
         this.handlePaymentRequest = this.handlePaymentRequest.bind(this);
         this.handleMessage = this.handleMessage.bind(this);
         this.handleTryAgain = this.handleTryAgain.bind(this);
@@ -157,9 +73,6 @@ export default class WorldpayPayment extends Component {
             complete: false,
             loading: false,
             canUsePaymentRequests: null,
-            canUseMasterpass: null,
-            googlePaymentsClient: null,
-            isGooglePayReady: null,
             isApplePayReady: null,
             applePaySession: null,
         });
@@ -171,55 +84,10 @@ export default class WorldpayPayment extends Component {
                 }))
                 .catch(err => this.handleError(err));
             if (resp.environment !== "TEST") {
-                const paymentsClient = new window.google.payments.api.PaymentsClient({environment: 'PRODUCTION'});
-                this.setState({
-                    googlePaymentsClient: paymentsClient
-                });
-                const isReadyToPayRequest = Object.assign({}, googlePaymentLiveBaseRequest);
-                isReadyToPayRequest.allowedPaymentMethods = [googlePayBaseCardPaymentMethod];
-                paymentsClient.isReadyToPay(isReadyToPayRequest)
-                    .then(resp => {
-                        if (resp.result) {
-                            this.setState({
-                                isGooglePayReady: true
-                            });
-                            console.log(this.googlePaymentRequest());
-                            paymentsClient.prefetchPaymentData(this.googlePaymentRequest());
-                        } else {
-                            this.setState({
-                                isGooglePayReady: false
-                            });
-                        }
-                    })
-                    .catch(err => this.handleError(err));
-                this.setState({
-                    canUseMasterpass: false,
-                });
+
             } else {
-                const paymentsClient = new window.google.payments.api.PaymentsClient({environment: 'TEST'});
-                this.setState({
-                    googlePaymentsClient: paymentsClient
-                });
-
-                const isReadyToPayRequest = Object.assign({}, googlePaymentTestBaseRequest);
-                isReadyToPayRequest.allowedPaymentMethods = [googlePayBaseCardPaymentMethod];
-                paymentsClient.isReadyToPay(isReadyToPayRequest)
-                    .then(resp => {
-                        if (resp.result) {
-                            this.setState({
-                                isGooglePayReady: true
-                            });
-                            paymentsClient.prefetchPaymentData(this.googlePaymentRequest());
-                        } else {
-                            this.setState({
-                                isGooglePayReady: false
-                            });
-                        }
-                    })
-                    .catch(err => this.handleError(err));
-
                 if (window.ApplePaySession) {
-                    if (window.ApplePaySession.canMakePayments(appleMerchantID)) {
+                    if (window.ApplePaySession.canMakePayments()) {
                         this.setState({
                             isApplePayReady: true
                         });
@@ -272,16 +140,6 @@ export default class WorldpayPayment extends Component {
     }
 
     componentDidMount() {
-        if (this.props.state === "failure") {
-            this.handleError(null, "Payment failed");
-        } else if (this.props.state === "success") {
-            this.setState({
-                complete: true,
-                loading: false,
-            });
-            this.props.onComplete(this.props.paymentId);
-            return;
-        }
         this.updatePayment();
         window.addEventListener("message", this.handleMessage, false);
     }
@@ -330,32 +188,35 @@ export default class WorldpayPayment extends Component {
     }
 
     paymentOptions() {
-        if (this.state.payment.customer === null) {
-            return {
-                requestPayerPhone: true,
-                requestPayerName: true,
-                requestPayerEmail: true,
-            }
-        } else {
-            return {}
+        return {
+            requestPayerPhone: this.state.payment.customer.request_phone,
+            requestPayerName:  this.state.payment.customer.request_name,
+            requestPayerEmail:  this.state.payment.customer.request_email,
         }
     }
 
     canUsePaymentRequests() {
         return new Promise((resolve, reject) => {
             if (!window.PaymentRequest) {
-                resolve(false);
+                resolve(false)
             }
-            resolve(true);
+            let r = new window.PaymentRequest([basicCardInstrument], {
+                total: {
+                    label: 'Total',
+                    amount: {
+                        currency: 'GBP',
+                        value: 0
+                    }
+                },
+            }, {});
+            r.canMakePayment()
+                .then(c => resolve(c))
+                .catch(e => reject(e));
         });
     }
 
     makePaymentRequest() {
-        let methods = [googlePaymentLiveDataRequest];
-        if (this.state.payment.environment === "TEST") {
-            methods = [googlePaymentTestDataRequest];
-        }
-        methods.push(basicCardInstrument);
+        let methods = [basicCardInstrument];
         let request = new PaymentRequest(methods, this.paymentDetails(), this.paymentOptions());
         request.show()
             .then(res => {
@@ -366,25 +227,15 @@ export default class WorldpayPayment extends Component {
                     this.setState({
                         selectedMethod: 'form'
                     });
+                } else {
+                    this.handleError(err)
                 }
             })
     }
 
     handlePaymentRequest(res) {
         if (res.methodName === "basic-card") {
-            this.basicCardToWorldPayToken(res.details)
-                .then(token => {
-                    this.takeBasicPayment(res, token)
-                })
-                .catch(err => {
-                    res.complete("fail")
-                        .then(() => {
-                            this.handleError(err, "Payment failed")
-                        })
-                        .catch(err => {
-                            this.handleError(err);
-                        })
-                })
+            this.takeBasicPayment(res);
         } else if (res.methodName === "https://google.com/pay") {
             this.takeGooglePayment(res);
         } else {
@@ -394,40 +245,13 @@ export default class WorldpayPayment extends Component {
         }
     }
 
-    googlePaymentRequest() {
-        let paymentDataRequest = null;
-        if (this.state.payment.environment === "TEST") {
-            paymentDataRequest = Object.assign({}, googlePaymentTestBaseRequest);
-            paymentDataRequest.allowedPaymentMethods = [
-                Object.assign({tokenizationSpecification: testTokenizationSpecification},
-                    googlePayBaseCardPaymentMethod)
-            ];
-        } else {
-            paymentDataRequest = Object.assign({}, googlePaymentLiveBaseRequest);
-            paymentDataRequest.allowedPaymentMethods = [
-                Object.assign({tokenizationSpecification: liveTokenizationSpecification},
-                    googlePayBaseCardPaymentMethod)
-            ];
-        }
-        paymentDataRequest.transactionInfo = {
-            totalPriceStatus: 'FINAL',
-            totalPrice: this.paymentTotal().toString(),
-            countryCode: "GB",
-            currencyCode: 'GBP'
-        };
-        if (this.state.payment.customer === null) {
-            paymentDataRequest.emailRequired = true;
-        }
-        return paymentDataRequest;
-    }
-
     applePaymentRequest() {
         const paymentDataRequest = {
             countryCode: 'GB',
             currencyCode: 'GBP',
             supportedNetworks: allowedAppleCardNetworks,
-            merchantCapabilities: ['supports3DS'],
-            requiredBillingContactFields: ["postalAddress"],
+            merchantCapabilities: ['supports3DS', 'supportsEMV', 'supportsCredit', 'supportsDebit'],
+            requiredBillingContactFields: ["postalAddress", "email", "phone", "name"],
             total: {label: merchantName, amount: this.paymentTotal().toString()},
             lineItems: this.state.payment.items.map(item => {
                 return {
@@ -447,31 +271,16 @@ export default class WorldpayPayment extends Component {
         return paymentDataRequest;
     }
 
-    makeGooglePayment() {
-        const paymentDataRequest = this.googlePaymentRequest();
-        this.state.googlePaymentsClient.loadPaymentData(paymentDataRequest).then((paymentData) => {
-            this.setState({
-                loading: true,
-            });
-            this.takeGooglePayment({
-                details: paymentData,
-                payerEmail: paymentData.email,
-                payerName: paymentData.paymentMethodData.info.billingAddress.name,
-                complete: () => Promise.resolve(true)
-            });
-        }).catch((err) => {
-            console.log(err);
-            if (err.statusCode !== "CANCELED") {
-                this.handleError(err);
-            }
-        });
-    }
-
     makeApplePayment() {
         const paymentDataRequest = this.applePaymentRequest();
         const session = new window.ApplePaySession(1, paymentDataRequest);
         session.onvalidatemerchant = this.validateApplePayment;
         session.onpaymentauthorized = this.takeApplePayment;
+        session.oncancel = () => {
+            this.setState({
+                applePaySession: null
+            })
+        };
 
         this.setState({
             applePaySession: session
@@ -483,46 +292,30 @@ export default class WorldpayPayment extends Component {
 
     validateApplePayment(event) {
         fetch(`${API_ROOT}apple-merchant-verification/`, {
-        method: "POST",
-        credentials: 'include',
-        body: JSON.stringify({
-            url: event.validationURL
-        }),
-        headers: {
-            "Content-Type": "application/json"
-        }
-    })
-        .then(resp => {
-            if (resp.ok) {
-                return resp.json();
-            } else {
-                throw new Error('Something went wrong');
+            method: "POST",
+            credentials: 'include',
+            body: JSON.stringify({
+                url: event.validationURL
+            }),
+            headers: {
+                "Content-Type": "application/json"
             }
         })
-        .then(resp => {
-            console.log(resp);
-            this.state.applePaySession.completeMerchantValidation(resp.verification);
-        })
-        .catch(err => {
-            this.state.applePaySession.abort();
-            this.handleError(err)
-        });
-    }
-
-    makeMasterPassPayment() {
-        const token = (this.state.payment.environment === "LIVE") ? "" : masterPassTestId;
-        const base_url = (this.state.payment.environment === "LIVE") ? "" : masterPassTestUrl;
-        masterpass.checkout({
-            "checkoutId": token,
-            "allowedCardTypes": masterPassAllowedCardNetworks,
-            "amount": this.paymentTotal().toString(),
-            "currency": "GBP",
-            "suppress3Ds": false,
-            "suppressShippingAddress": true,
-            "cartId": this.state.payment.id,
-            "validityPeriodMinutes": 3,
-            "callbackUrl": base_url + `${this.state.payment.id}/${btoa(window.location)}`,
-        });
+            .then(resp => {
+                if (resp.ok) {
+                    return resp.json();
+                } else {
+                    throw new Error('Something went wrong');
+                }
+            })
+            .then(resp => {
+                console.log(resp);
+                this.state.applePaySession.completeMerchantValidation(resp.verification);
+            })
+            .catch(err => {
+                this.state.applePaySession.abort();
+                this.handleError(err)
+            });
     }
 
     onFormSubmit(res) {
@@ -532,69 +325,68 @@ export default class WorldpayPayment extends Component {
         this.handlePaymentRequest(res);
     }
 
-    takeBasicPayment(res, token) {
+    takeBasicPayment(res) {
         let data = {
-            token: token,
-            billingAddress: res.details.billingAddress,
-            name: res.details.cardholderName,
-            accepts: this.props.acceptsHeader
-        };
-        this.takePayment(res, data);
-    }
-
-    takeGooglePayment(res) {
-        let billingAddress = res.details.paymentMethodData.info.billingAddress;
-        let data = {
-            billingAddress: {
-                addressLine: [billingAddress.address1, billingAddress.address2, billingAddress.address3],
-                country: billingAddress.countryCode,
-                city: billingAddress.locality,
-                dependentLocality: billingAddress.administrativeArea,
-                organization: "",
-                phone: "",
-                postalCode: billingAddress.postalCode,
-                recipient: billingAddress.name,
-                region: "",
-                regionCode: "",
-                sortingCode: billingAddress.sortingCode
+            card: {
+                name: res.details.cardholderName,
+                exp_month: res.details.expiryMonth,
+                exp_year: res.details.expiryYear,
+                card_number: res.details.cardNumber,
+                cvc: res.details.cardSecurityCode,
             },
-            name: billingAddress.name,
-            accepts: this.props.acceptsHeader,
-            googleData: res.details.paymentMethodData
+            billing_address: res.details.billingAddress,
+            email: res.payerEmail,
+            phone: res.payerPhone,
+            name: res.payerName
         };
         this.takePayment(res, data);
     }
 
     takeApplePayment(event) {
+        console.log(event);
         let res = {
-            complete: () => Promise.resolve({})
-        }
-        // let billingAddress = res.details.paymentMethodData.info.billingAddress;
-        // let data = {
-        //     billingAddress: {
-        //         addressLine: [billingAddress.address1, billingAddress.address2, billingAddress.address3],
-        //         country: billingAddress.countryCode,
-        //         city: billingAddress.locality,
-        //         dependentLocality: billingAddress.administrativeArea,
-        //         organization: "",
-        //         phone: "",
-        //         postalCode: billingAddress.postalCode,
-        //         recipient: billingAddress.name,
-        //         region: "",
-        //         regionCode: "",
-        //         sortingCode: billingAddress.sortingCode
-        //     },
-        //     name: billingAddress.name,
-        //     accepts: this.props.acceptsHeader,
-        //     googleData: res.details.paymentMethodData
-        // };
-        // this.takePayment(res, data);
+            complete: (status) => new Promise((resolve, reject) => {
+                if (status === "success") {
+                    this.state.applePaySession.completePayment({
+                        status: 0
+                    })
+                } else {
+                    this.state.applePaySession.completePayment({
+                        status: 1
+                    })
+                }
+                resolve(true);
+            })
+        };
+        let data = {
+            billingAddress: {
+                addressLine: event.billingContact.addresLines,
+                country: event.billingContact.countryCode,
+                city: event.billingContact.locality,
+                dependentLocality: "",
+                organization: "",
+                phone: event.billingContact.phoneNumber,
+                postalCode: event.billingContact.postalCode,
+                recipient: event.billingContact.givenName + " " + event.billingContact.familyName,
+                region: event.billingContact.administrativeArea,
+                regionCode: "",
+                sortingCode: billingAddress.sortingCode
+            },
+            first_name: event.billingContact.givenName,
+            last_name: event.billingContact.familyName,
+            appleData: event.token,
+        };
+        console.log(data);
+        this.takePayment(res, data);
     }
 
     takePayment(res, data) {
-        data.phone = res.payerPhone ? res.payerPhone : this.state.payment.customer.phone;
-        data.email = res.payerEmail ? res.payerEmail : this.state.payment.customer.email;
-        data.payerName = res.payerName ? res.payerName : this.state.payment.customer.name;
+        data.accepts = this.props.acceptsHeader;
+        if (data.name) {
+            const name = data.name.split(" ");
+            data.first_name = name.splice(-1)[0];
+            data.last_name = name.join(" ");
+        }
 
         if (this.state.payment.new) {
             data.payment = this.state.payment;
@@ -626,7 +418,8 @@ export default class WorldpayPayment extends Component {
                     res.complete('success')
                         .then(() => {
                             this.setState({
-                                threedsData: resp
+                                threedsData: resp,
+                                email: data.email ? data.email : this.state.payment.customer.email
                             });
                         })
                         .catch(err => this.handleError(err))
@@ -660,45 +453,6 @@ export default class WorldpayPayment extends Component {
             })
     }
 
-    basicCardToWorldPayToken(res) {
-        return new Promise((resolve, reject) => {
-            const token = (this.state.payment.environment === "LIVE") ? worldPayLiveKey : worldPayTestKey;
-
-            fetch("https://api.worldpay.com/v1/tokens", {
-                method: "POST",
-                body: JSON.stringify({
-                    reusable: true,
-                    paymentMethod: {
-                        name: res.cardholderName,
-                        expiryMonth: res.expiryMonth,
-                        expiryYear: res.expiryYear,
-                        cardNumber: res.cardNumber,
-                        type: "Card",
-                        cvc: res.cardSecurityCode,
-                    },
-                    clientKey: token
-                })
-            })
-                .then(resp => {
-                    if (resp.ok) {
-                        return resp.json();
-                    } else {
-                        resp.json()
-                            .then(resp => {
-                                throw new Error(resp.message);
-                            })
-                            .catch(err => reject(err));
-                    }
-                })
-                .then(resp => {
-                    resolve(resp.token);
-                })
-                .catch(err => {
-                    reject(err);
-                })
-        });
-    }
-
     onComplete(email) {
         this.setState({
             complete: true,
@@ -714,7 +468,7 @@ export default class WorldpayPayment extends Component {
                     this.handleError();
                 }
                 if (event.data.threeds_approved) {
-                    this.onComplete();
+                    this.onComplete(this.state.email);
                 } else {
                     this.handleError(null, "Payment failed");
                 }
@@ -778,8 +532,7 @@ export default class WorldpayPayment extends Component {
             </React.Fragment>;
         } else if (this.state.complete) {
             return <h3>Payment successful</h3>;
-        } else if (this.state.payment === null || this.state.canUsePaymentRequest === null ||
-            this.state.isGooglePayReady === null) {
+        } else if (this.state.payment === null || this.state.canUsePaymentRequest === null) {
             return <SVG src={loader} className="loader"/>
         } else if (this.state.threedsData !== null) {
             return <iframe src={this.state.threedsData.frame} width={390} height={400}/>
@@ -791,25 +544,17 @@ export default class WorldpayPayment extends Component {
                 </div>
             </React.Fragment>;
         } else {
-            if (this.state.selectedMethod !== "form" && (this.state.isGooglePayReady || this.state.canUsePaymentRequest || this.state.canUseMasterpass)) {
+            if (this.state.selectedMethod !== "form" && (this.state.isApplePayReady || this.state.canUsePaymentRequest)) {
                 return <div className="buttons">
                     {this.state.isApplePayReady ?
                         <div className="apple-pay-button-with-text apple-pay-button-black-with-text"
                              onClick={this.makeApplePayment}>
                             <span className="text">Buy with</span>
-                            <span className="logo"></span>
+                            <span className="logo"/>
                         </div> : null}
-                    {this.state.isGooglePayReady ?
-                        <GPayButton paymentsClient={this.state.googlePaymentsClient}
-                                    onClick={this.makeGooglePayment}/> : null}
                     {this.state.canUsePaymentRequest ? <button onClick={this.makePaymentRequest}>
                         Autofill from browser
                     </button> : null}
-                    {this.state.canUseMasterpass ? <div className="masterpass">
-                        <img src="https://masterpass.com/dyn/img/btn/global/mp_chk_btn_290x048px.svg" alt="MasterPass"
-                             onClick={this.makeMasterPassPayment} width={240}/>
-                        <a href="https://www.mastercard.com/mc_us/wallet/learnmore/en/GB/">Learn more</a>
-                    </div> : null}
                     <a href="" onClick={(e) => {
                         e.preventDefault();
                         this.setState({selectedMethod: "form"})
