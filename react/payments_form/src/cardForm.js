@@ -1,6 +1,7 @@
 import React, {Component} from 'react';
 import {faCcVisa, faCcMastercard, faCcAmex} from '@fortawesome/free-brands-svg-icons';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { AsYouType } from "libphonenumber-js";
 import Payment from 'payment';
 
 const brands = {
@@ -36,16 +37,25 @@ export default class CardForm extends Component {
             card_display_expiry: "Expiry: •• / ••",
             card_cvc: "",
             card_display_cvc: "•••",
+            exp_month: null,
+            exp_year: null,
             name_focused: false,
             number_focused: false,
             expiry_focused: false,
             cvc_focused: false,
+            tel: '',
+            telValid: false,
+            telNum: null,
+            email: '',
+            emailValid: false,
         };
 
         this.updateCardName = this.updateCardName.bind(this);
         this.updateCardNumber = this.updateCardNumber.bind(this);
         this.updateCardExpiry = this.updateCardExpiry.bind(this);
         this.updateCardCvc = this.updateCardCvc.bind(this);
+        this.handleTelChange = this.handleTelChange.bind(this);
+        this.handleEmailChange = this.handleEmailChange.bind(this);
         this.handleSubmit = this.handleSubmit.bind(this);
     }
 
@@ -59,12 +69,11 @@ export default class CardForm extends Component {
     handleSubmit(event) {
         event.preventDefault();
 
-        const {refs} = this;
-        const name = refs.name.value;
-        const number = refs.number.value;
-        const exp_month = parseInt(refs.month.value, 10);
-        const exp_year = parseInt(refs.year.value, 10);
-        const cvc = refs.cvc.value;
+        const name = this.state.card_name;
+        const number = this.state.card_number;
+        const exp_month = this.state.exp_month;
+        const exp_year = this.state.exp_year;
+        const cvc = this.state.card_cvc;
         const paymentResponse = {
             details: {
                 billingAddress: {
@@ -73,9 +82,9 @@ export default class CardForm extends Component {
                     city: "",
                     dependentLocality: "",
                     organization: "",
-                    phone: refs.phone ? refs.phone.value : this.props.payment.customer.phone,
+                    phone: this.state.telNum ? this.state.telNum.format("E.164"): this.props.payment.customer.phone,
                     postalCode: "",
-                    recipient: refs.name.value,
+                    recipient: name,
                     region: "",
                     regionCode: "",
                     sortingCode: ""
@@ -91,10 +100,10 @@ export default class CardForm extends Component {
             complete: () => Promise.resolve({})
         };
         if (this.props.paymentOptions.requestPayerPhone) {
-            paymentResponse.payerPhone = refs.phone ? refs.phone.value : this.props.payment.customer.phone;
+            paymentResponse.payerPhone = this.state.telNum.format("E.164");
         }
         if (this.props.paymentOptions.requestPayerEmail) {
-            paymentResponse.payerEmail = refs.email.value;
+            paymentResponse.payerEmail = this.state.email;
         }
         this.props.onSubmit(paymentResponse);
     }
@@ -161,38 +170,36 @@ export default class CardForm extends Component {
             parts = parts.slice(0, 2)
         }
         let had_slash = parts.length >= 2;
-        let had_long_year = false;
         let month = null;
+        let month_int = null;
         let year = null;
+        let year_int = null;
         if (parts[0].trim().length > 0) {
             month = parts[0].trim();
             if (month.length > 2) {
                 month = month.slice(0, 2);
             }
-            month = parseInt(month);
-            if (month > 12) {
-                month = 12;
+            month_int = parseInt(month);
+            if (month_int > 12) {
+                month_int = 12;
             }
             if (parts.length > 1 && parts[1].trim().length > 0) {
                 year = parts[1].trim();
                 if (year.length > 4) {
                     year = year.slice(0, 4);
                 }
-                if (year.length > 2) {
-                    had_long_year = true;
-                }
                 if (year.length === 2) {
-                    year = (Math.floor(new Date().getFullYear() / 1000) * 1000) + parseInt(year);
+                    year_int = (Math.floor(new Date().getFullYear() / 1000) * 1000) + parseInt(year);
                 } else {
-                    year = parseInt(year)
+                    year_int = parseInt(year)
                 }
             }
         }
         new_val = "";
         let new_display_val = "Expiry: ";
-        if (month !== null) {
-            new_val = month.toString();
-            new_display_val += new_val.padStart(2, "0") + " / ";
+        if (month !== null && month_int !== null) {
+            new_val += month;
+            new_display_val += month_int.toString().padStart(2, "0") + " / ";
             if (had_slash) {
                 new_val += "/";
             }
@@ -200,14 +207,10 @@ export default class CardForm extends Component {
                 if (!had_slash) {
                     new_val += "/";
                 }
-                if (had_long_year) {
-                    new_val += year.toString();
-                } else {
-                    new_val += (year % 1000).toString();
-                }
-                new_display_val += (year % 1000).toString().padStart(2, "0");
+                new_val += year;
+                new_display_val += (year_int % 1000).toString().padStart(2, "0");
                 let a = new Date();
-                if (year < a.getFullYear() || (year === a.getFullYear() && month <= a.getMonth())) {
+                if (year_int < a.getFullYear() || (year_int === a.getFullYear() && month_int <= a.getMonth())) {
                     this.refs.expiry.setCustomValidity("Date is in the past");
                 } else {
                     this.refs.expiry.setCustomValidity("");
@@ -222,7 +225,9 @@ export default class CardForm extends Component {
         }
         this.setState({
             card_expiry: new_val,
-            card_display_expiry: new_display_val
+            card_display_expiry: new_display_val,
+            exp_month: month_int,
+            exp_year: year_int
         })
     }
 
@@ -251,21 +256,51 @@ export default class CardForm extends Component {
         })
     }
 
-    render() {
-        // let curYear = new Date().getFullYear();
-        // let hasPhone = false;
-        // if (this.props.payment.customer) {
-        //     if (this.props.payment.customer.phone) {
-        //         hasPhone = true;
-        //     }
-        // }
 
+    static valid_email(email) {
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    }
+
+    handleTelChange(event) {
+        let new_val = event.target.value;
+        let formatter = new AsYouType('GB');
+        let val = formatter.input(new_val);
+        let num = formatter.getNumber();
+        let valid = formatter.isValid();
+        if (!valid) {
+            this.refs.tel.setCustomValidity("Invalid phone number");
+        } else {
+            this.refs.tel.setCustomValidity("");
+        }
+        this.setState({
+            tel: val,
+            telNum: num,
+            telValid: valid,
+        });
+    }
+
+    handleEmailChange(event) {
+        let new_val = event.target.value;
+        let valid = false;
+        if (!CardForm.valid_email(new_val)) {
+            this.refs.email.setCustomValidity("Invalid email");
+        } else {
+            this.refs.email.setCustomValidity("");
+            valid = true;
+        }
+        this.setState({
+            email: new_val,
+            emailValid: valid
+        });
+    }
+
+    render() {
         return <div className="CardForm">
             <form onSubmit={this.handleSubmit}>
                 {(this.props.paymentOptions.requestPayerPhone) ?
-                    <input className="phone" type="tel" ref="phone" placeholder="Phone number" required/> : null}
+                    <input className="phone" type="tel" ref="tel" value={this.state.tel} onChange={this.handleTelChange} placeholder="Phone number" required/> : null}
                 {(this.props.paymentOptions.requestPayerEmail) ?
-                    <input className="email" type="email" ref="email" placeholder="Email address" required/> : null}
+                    <input className="email" type="email" ref="email" value={this.state.email} onChange={this.handleEmailChange} placeholder="Email address" required/> : null}
                 <div className="disp-card">
                     <div className={"disp-card-inner " + this.state.card_type + (this.state.cvc_focused ? " flip" : "")}>
                         <div className="disp-card-front" style={this.state.card_type ? {

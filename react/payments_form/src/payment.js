@@ -7,7 +7,7 @@ import WorldpayPayment from './worldpayPayment';
 import StripePayment from './stripePayment';
 
 export const API_ROOT = process.env.BASE_URL ? process.env.BASE_URL :
-    process.env.NODE_ENV  === 'production' ? 'https://bot.cardifftec.uk/' : 'https://wwfypc-payments.eu.ngrok.io/';
+    process.env.NODE_ENV  === 'production' ? 'https://payment.cardifftec.uk/' : 'https://wwfypc-payments.eu.ngrok.io/';
 
 const payment_provider = process.env.PAYMENT_PROVIDER ? process.env.PAYMENT_PROVIDER : "WORLDPAY";
 

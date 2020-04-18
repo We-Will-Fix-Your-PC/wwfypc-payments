@@ -294,6 +294,7 @@ impl Handler<DeleteThreedsData> for DbExecutor {
 
 #[derive(Debug, Clone)]
 pub struct CreateCard {
+    id: Uuid,
     customer_id: Uuid,
     pan: String,
     exp_month: u32,
@@ -302,8 +303,9 @@ pub struct CreateCard {
 }
 
 impl CreateCard {
-    pub fn new(customer_id: &Uuid, pan: &str, exp_month: u32, exp_year: u32, name_on_card: &str) -> Self {
+    pub fn new(id: &Uuid, customer_id: &Uuid, pan: &str, exp_month: u32, exp_year: u32, name_on_card: &str) -> Self {
         Self {
+            id: id.to_owned(),
             customer_id: customer_id.to_owned(),
             pan: pan.to_string(),
             exp_month,
@@ -329,6 +331,7 @@ impl Handler<CreateCard> for DbExecutor {
             Ok(card) => Ok(card),
             Err(diesel::result::Error::NotFound) => {
                 let new_data = models::NewCard {
+                    id: &msg.id,
                     customer_id: &msg.customer_id,
                     pan: &msg.pan,
                     exp_month: msg.exp_month as i32,

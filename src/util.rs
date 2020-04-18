@@ -1,8 +1,13 @@
 use futures::compat::Future01CompatExt;
 
 pub async fn async_reqwest_to_error(request: reqwest::r#async::RequestBuilder) -> failure::Fallible<reqwest::r#async::Response> {
-    let c = request.send().compat().await?;
-    Ok(c.error_for_status()?)
+    let mut c = request.send().compat().await?;
+    if c.status().is_client_error() || c.status().is_server_error() {
+        debug!("Got response with status code {} with body {:?}", c.status(), c.text().compat().await);
+        Err(c.error_for_status().unwrap_err().into())
+    } else {
+        Ok(c)
+    }
 }
 
 pub async fn user_id_from_session(session: &actix_session::Session, oauth_client: &crate::oauth::OAuthClient) -> actix_web::Result<Option<uuid::Uuid>> {

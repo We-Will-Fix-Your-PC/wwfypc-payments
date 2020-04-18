@@ -390,6 +390,15 @@ export default class WorldpayPayment extends Component {
 
         if (this.state.payment.new) {
             data.payment = this.state.payment;
+            if (data.email) {
+                data.payment.customer.email = data.email;
+            }
+            if (data.phone) {
+                data.payment.customer.phone = data.phone;
+            }
+            if (data.name) {
+                data.payment.customer.name = data.name;
+            }
         }
 
         fetch(`${API_ROOT}payment/worldpay/${this.state.payment.id}/`, {

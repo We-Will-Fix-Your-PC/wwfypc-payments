@@ -45,7 +45,7 @@ pub fn send_payment_notification(data: CompletePayment, state: JobsState) -> Fal
     let user = futures::executor::block_on(state.keycloak.get_user(payment.customer_id, &token))?;
     let email_items: String = items.into_iter()
         .map(|item| format!(
-            "- {}x {} @{} GBP
+            "- {}x {} @ {} GBP
 - Item type: {}
 - Item data: {}",
             item.quantity, item.title, (item.price.0 as f64) / 100.0, item.item_type, item.item_data

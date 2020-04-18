@@ -3,13 +3,14 @@
 PAYMENT_PROVIDER="WORLDPAY";
 export PAYMENT_PROVIDER
 
-#VERSION=$(sentry-cli releases propose-version || exit)
+VERSION=$(sentry-cli releases propose-version || exit)
 
 cd react/payments_form || exit
 yarn webpack --config webpack.prod.js || exit
 cd ../..
 
-cargo build --release
+docker build -t "theenbyperor/wwfypc-payments:$VERSION" . || exit
+docker push "theenbyperor/wwfypc-payments:$VERSION" || exit
 
-#sentry-cli releases --org we-will-fix-your-pc new -p bot-server $VERSION || exit
-#sentry-cli releases --org we-will-fix-your-pc set-commits --auto $VERSION
+sentry-cli releases --org we-will-fix-your-pc new -p payments-server $VERSION || exit
+sentry-cli releases --org we-will-fix-your-pc set-commits --auto $VERSION

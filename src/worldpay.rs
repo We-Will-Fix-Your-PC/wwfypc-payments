@@ -2,6 +2,7 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::prelude::*;
 use crypto::mac::Mac;
 use futures::compat::Future01CompatExt;
+use encoding::types::Encoding;
 
 use crate::db;
 use crate::jobs;
@@ -400,6 +401,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
 
     let description: String = items.iter().map(|i| i.title.clone()).collect::<Vec<String>>().join(", ");
     let total = items.iter().map(|i| i.price.0 * i.quantity as i64).fold(0, |acc, i| acc + i);
+    let name = format!("{} {}", user.first_name.unwrap_or("".to_string()), user.last_name.unwrap_or("".to_string()));
 
     let order_data = WorldpayOrder {
         order_type: "ECOM".to_string(),
@@ -407,7 +409,13 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
         customer_order_code: payment.id.to_string(),
         amount: total,
         currency_code: "GBP".to_string(),
-        name: format!("{} {}", user.first_name.unwrap_or("".to_string()), user.last_name.unwrap_or("".to_string())),
+        name: match encoding::all::ISO_8859_1.encode(&name, encoding::EncoderTrap::Ignore) {
+            Ok(s) => match String::from_utf8(s) {
+                Ok(s) => s,
+                Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+            },
+            Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+        },
         shopper_email_address: user.email.unwrap_or("".to_string()),
         billing_address,
         shopper_ip_address: req.connection_info().remote().unwrap_or("").to_string(),
@@ -428,6 +436,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
     };
 
     match match data.db.send(db::CreateCard::new(
+        &uuid::Uuid::new_v4(),
         &payment.customer_id,
         &payment_data.card.card_number,
         payment_data.card.exp_month,

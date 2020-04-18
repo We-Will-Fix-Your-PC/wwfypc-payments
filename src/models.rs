@@ -104,6 +104,7 @@ pub struct Card {
 #[derive(Clone, Debug, Insertable)]
 #[table_name="cards"]
 pub struct NewCard<'a> {
+    pub id: &'a Uuid,
     pub customer_id: &'a Uuid,
     pub pan: &'a str,
     pub exp_month: i32,

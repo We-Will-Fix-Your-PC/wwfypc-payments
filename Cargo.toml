@@ -44,6 +44,9 @@ lettre_email = "0.9"
 failure = "0.1"
 lapin-futures = "^0.28"
 amqp = "0.1.3"
+encoding = "0.2"
+sentry = "0.12.0"
+sentry-actix = "0.11.0"
 
 [build-dependencies]
 actix-web-static-files = "0.2"

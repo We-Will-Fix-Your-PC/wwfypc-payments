@@ -53,7 +53,11 @@ lazy_static! {
 }
 
 fn main() {
-    pretty_env_logger::init();
+    openssl_probe::init_ssl_cert_env_vars();
+    let _guard = sentry::init("https://e4332b5c1b9e471a88af3d05b89b46d9@o266594.ingest.sentry.io/5205059");
+    sentry::integrations::panic::register_panic_handler();
+    let mut log_builder = pretty_env_logger::formatted_builder().unwrap();
+    sentry::integrations::env_logger::init(Some(log_builder.build()), Default::default());
 
     info!("Migrating database...");
     let connection = config::establish_connection();
@@ -95,6 +99,7 @@ fn main() {
 
         App::new()
             .data(data.clone())
+            .middleware(sentry_actix::SentryMiddleware::new())
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
             .wrap(config::cookie_session())
@@ -135,7 +140,7 @@ fn main() {
     server = if let Some(l) = listenfd.take_tcp_listener(0).unwrap() {
         server.listen(l).unwrap()
     } else {
-        server.bind("127.0.0.1:3000").unwrap()
+        server.bind("[::]:3000").unwrap()
     };
 
     server.start();
