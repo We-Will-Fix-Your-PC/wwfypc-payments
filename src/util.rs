@@ -1,10 +1,9 @@
-use futures::compat::Future01CompatExt;
-
-pub async fn async_reqwest_to_error(request: reqwest::r#async::RequestBuilder) -> failure::Fallible<reqwest::r#async::Response> {
-    let mut c = request.send().compat().await?;
+pub async fn async_reqwest_to_error(request: reqwest::RequestBuilder) -> failure::Fallible<reqwest::Response> {
+    let c = request.send().await?;
     if c.status().is_client_error() || c.status().is_server_error() {
-        debug!("Got response with status code {} with body {:?}", c.status(), c.text().compat().await);
-        Err(c.error_for_status().unwrap_err().into())
+        let err = Err(c.error_for_status_ref().unwrap_err().into());
+        debug!("Got response with status code {} with body {:?}", c.status(), c.text().await);
+        err
     } else {
         Ok(c)
     }

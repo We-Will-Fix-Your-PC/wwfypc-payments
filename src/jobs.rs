@@ -1,8 +1,7 @@
 use lettre_email::Email;
 use lettre::Transport;
 use chrono::prelude::*;
-use futures01::future::{Future, ok, err};
-use failure::{Error, Fallible};
+use failure::Fallible;
 use std::sync::{Arc, Mutex};
 use crate::db;
 
@@ -29,18 +28,8 @@ impl CompletePayment {
 }
 
 pub fn send_payment_notification(data: CompletePayment, state: JobsState) -> Fallible<()> {
-    let payment = state.db.send(db::GetPayment::new(&data.payment_id))
-        .from_err()
-        .and_then(|res| match res {
-            Ok(payment) => ok(payment),
-            Err(e) => err(Error::from(e))
-        }).wait()?;
-    let items = state.db.send(db::GetPaymentItems::new(&payment))
-        .from_err()
-        .and_then(|res| match res {
-            Ok(items) => ok(items),
-            Err(e) => err(Error::from(e))
-        }).wait()?;
+    let payment = futures::executor::block_on(state.db.send(db::GetPayment::new(&data.payment_id)))??;
+    let items = futures::executor::block_on(state.db.send(db::GetPaymentItems::new(&payment)))??;
     let token = futures::executor::block_on(state.oauth.get_access_token())?;
     let user = futures::executor::block_on(state.keycloak.get_user(payment.customer_id, &token))?;
     let email_items: String = items.into_iter()

@@ -1,5 +1,4 @@
 use actix_web::{HttpRequest, HttpResponse, web};
-use futures::compat::Future01CompatExt;
 use chrono::prelude::*;
 use crate::db;
 
@@ -49,7 +48,7 @@ pub async fn new_payment(token: crate::oauth::BearerAuthToken, data: web::Data<c
         new_payment.environment,
         &new_payment.customer_id,
         &items,
-    )).compat().await?;
+    )).await?;
 
     match res {
         Ok(payment) => {
@@ -106,7 +105,7 @@ pub async fn get_payment<'a>(token: crate::oauth::OptionalBearerAuthToken, data:
         }
     }
 
-    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).await {
         Ok(payment) => payment,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -129,7 +128,7 @@ pub async fn get_payment<'a>(token: crate::oauth::OptionalBearerAuthToken, data:
             return Err(actix_web::error::ErrorForbidden(""))
         }
     }
-    let items = match match data.db.send(db::GetPaymentItems::new(&payment)).compat().await {
+    let items = match match data.db.send(db::GetPaymentItems::new(&payment)).await {
         Ok(items) => items,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -188,7 +187,7 @@ async fn render_payment(req: HttpRequest, data: web::Data<crate::config::AppStat
         }
     };
 
-    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {

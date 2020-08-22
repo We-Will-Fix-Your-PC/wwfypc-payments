@@ -1,7 +1,6 @@
 use chrono::prelude::*;
 use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
-use futures::compat::Future01CompatExt;
 use failure::Error;
 
 #[derive(Clone)]
@@ -12,7 +11,7 @@ pub struct OAuthClientConfig {
 }
 
 impl OAuthClientConfig {
-    pub fn new(client_id: &str, client_secret: &str, well_known_url: &str) -> Result<Self, reqwest::UrlError> {
+    pub fn new(client_id: &str, client_secret: &str, well_known_url: &str) -> Result<Self, url::ParseError> {
         Ok(Self {
             client_id: client_id.to_owned(),
             client_secret: client_secret.to_owned(),
@@ -147,7 +146,7 @@ impl From<failure::Error> for VerifyTokenError {
 #[derive(Clone)]
 pub struct OAuthClient {
     config: OAuthClientConfig,
-    client: reqwest::r#async::Client,
+    client: reqwest::Client,
     _well_known: Arc<RwLock<Option<OAuthWellKnown>>>,
     _access_token: Arc<RwLock<Option<OAuthToken>>>,
     _jwks: Arc<RwLock<Option<alcoholic_jwt::JWKS>>>,
@@ -157,7 +156,7 @@ impl OAuthClient {
     pub fn new(config: OAuthClientConfig) -> Self {
         Self {
             config,
-            client: reqwest::r#async::Client::new(),
+            client: reqwest::Client::new(),
             _well_known: Arc::new(RwLock::new(None)),
             _access_token: Arc::new(RwLock::new(None)),
             _jwks: Arc::new(RwLock::new(None)),
@@ -169,10 +168,10 @@ impl OAuthClient {
             return Ok(well_known);
         }
 
-        let mut c = crate::util::async_reqwest_to_error(
+        let c = crate::util::async_reqwest_to_error(
             self.client.get(self.config.well_known_url.clone())
         ).await?;
-        let d = c.json::<OAuthWellKnown>().compat().await?;
+        let d = c.json::<OAuthWellKnown>().await?;
         *self._well_known.write().unwrap() = Some(d.clone());
         Ok(d)
     }
@@ -185,10 +184,10 @@ impl OAuthClient {
         let w = self.well_known().await?;
         match w.jwks_uri {
             Some(u) => {
-                let mut c = crate::util::async_reqwest_to_error(
+                let c = crate::util::async_reqwest_to_error(
                     self.client.get(&u)
                 ).await?;
-                let d = c.json::<alcoholic_jwt::JWKS>().compat().await?;
+                let d = c.json::<alcoholic_jwt::JWKS>().await?;
                 *self._jwks.write().unwrap() = Some(d.clone());
                 Ok(d)
             }
@@ -274,12 +273,12 @@ impl OAuthClient {
 
                 let token = self.get_access_token().await?;
 
-                let mut c = crate::util::async_reqwest_to_error(
+                let c = crate::util::async_reqwest_to_error(
                     self.client.post(&u)
                         .bearer_auth(&token)
                         .form(&form)
                 ).await?;
-                let t = c.json::<OAuthTokenResponse>().compat().await?;
+                let t = c.json::<OAuthTokenResponse>().await?;
 
                 let now = Utc::now();
 
@@ -324,10 +323,10 @@ impl OAuthClient {
                                     refresh_token: &refresh_token,
                                 };
 
-                                let mut c = crate::util::async_reqwest_to_error(
+                                let c = crate::util::async_reqwest_to_error(
                                     self.client.post(&u).form(&form)
                                 ).await?;
-                                let t = c.json::<OAuthTokenResponse>().compat().await?;
+                                let t = c.json::<OAuthTokenResponse>().await?;
                                 *self._access_token.write().unwrap() = Some(OAuthToken {
                                     access_token: t.access_token.clone(),
                                     expires_at: now + chrono::Duration::seconds(t.expires_in),
@@ -356,10 +355,10 @@ impl OAuthClient {
                     grant_type: "client_credentials",
                 };
 
-                let mut c = crate::util::async_reqwest_to_error(
+                let c = crate::util::async_reqwest_to_error(
                     self.client.post(&u).form(&form)
                 ).await?;
-                let t = match c.json::<OAuthTokenResponse>().compat().await {
+                let t = match c.json::<OAuthTokenResponse>().await {
                     Ok(c) => c,
                     Err(e) => return Err(e.into())
                 };
@@ -389,11 +388,11 @@ impl OAuthClient {
                     token,
                 };
 
-                let mut c = crate::util::async_reqwest_to_error(
+                let c = crate::util::async_reqwest_to_error(
                     self.client.post(&u).form(&form)
                 ).await?;
 
-                let i = c.json::<OAuthTokenIntrospect>().compat().await?;
+                let i = c.json::<OAuthTokenIntrospect>().await?;
                 Ok(i)
             }
             None => Err(failure::err_msg("no introspection endpoint"))
@@ -450,10 +449,10 @@ impl OAuthClient {
                                     refresh_token: &refresh_token,
                                 };
 
-                                let mut c = crate::util::async_reqwest_to_error(
+                                let c = crate::util::async_reqwest_to_error(
                                     self.client.post(&u).form(&form)
                                 ).await?;
-                                let t = c.json::<OAuthTokenResponse>().compat().await?;
+                                let t = c.json::<OAuthTokenResponse>().await?;
 
                                 OAuthToken {
                                     access_token: t.access_token.clone(),
@@ -545,44 +544,52 @@ impl OptionalBearerAuthToken {
 
 impl actix_web::FromRequest for BearerAuthToken {
     type Error = actix_web::Error;
-    type Future = Result<Self, Self::Error>;
+    type Future = futures::future::LocalBoxFuture<'static, Result<Self, Self::Error>>;
     type Config = ();
 
     fn from_request(req: &actix_web::HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
-        let auth_header = req.headers().get(actix_web::http::header::AUTHORIZATION);
-        if let Some(auth_token) = auth_header {
-            if let Ok(auth_token_str) = auth_token.to_str() {
-                let auth_token_str = auth_token_str.trim();
-                if auth_token_str.starts_with("Bearer ") {
-                    Ok(Self {
-                        token: auth_token_str[7..].to_owned()
-                    })
+        Box::pin(futures::future::ready({
+            let auth_header = req.headers().get(actix_web::http::header::AUTHORIZATION);
+            if let Some(auth_token) = auth_header {
+                if let Ok(auth_token_str) = auth_token.to_str() {
+                    let auth_token_str = auth_token_str.trim();
+                    if auth_token_str.starts_with("Bearer ") {
+                        Ok(Self {
+                            token: auth_token_str[7..].to_owned()
+                        })
+                    } else {
+                        Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
+                    }
                 } else {
                     Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
                 }
             } else {
                 Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
             }
-        } else {
-            Err(actix_web::HttpResponse::new(http::StatusCode::UNAUTHORIZED).into())
-        }
+        }))
     }
 }
 
 impl actix_web::FromRequest for OptionalBearerAuthToken {
     type Error = actix_web::Error;
-    type Future = Result<Self, Self::Error>;
+    type Future = futures::future::LocalBoxFuture<'static, Result<Self, Self::Error>>;
     type Config = ();
 
     fn from_request(req: &actix_web::HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
-        let auth_header = req.headers().get(actix_web::http::header::AUTHORIZATION);
-        if let Some(auth_token) = auth_header {
-            if let Ok(auth_token_str) = auth_token.to_str() {
-                let auth_token_str = auth_token_str.trim();
-                if auth_token_str.starts_with("Bearer ") {
-                    Ok(Self {
-                        token: Some(auth_token_str[7..].to_owned())
-                    })
+        Box::pin(futures::future::ready({
+            let auth_header = req.headers().get(actix_web::http::header::AUTHORIZATION);
+            if let Some(auth_token) = auth_header {
+                if let Ok(auth_token_str) = auth_token.to_str() {
+                    let auth_token_str = auth_token_str.trim();
+                    if auth_token_str.starts_with("Bearer ") {
+                        Ok(Self {
+                            token: Some(auth_token_str[7..].to_owned())
+                        })
+                    } else {
+                        Ok(Self {
+                            token: None
+                        })
+                    }
                 } else {
                     Ok(Self {
                         token: None
@@ -593,10 +600,6 @@ impl actix_web::FromRequest for OptionalBearerAuthToken {
                     token: None
                 })
             }
-        } else {
-            Ok(Self {
-                token: None
-            })
-        }
+        }))
     }
 }

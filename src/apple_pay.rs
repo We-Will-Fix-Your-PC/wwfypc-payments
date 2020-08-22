@@ -1,6 +1,4 @@
 use actix_web::{HttpRequest, HttpResponse, web};
-use futures::compat::Future01CompatExt;
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct MerchantVerificationData {
     url: String,
@@ -29,7 +27,7 @@ pub async fn merchant_verification(req: HttpRequest, state: web::Data<crate::con
             HttpResponse::BadRequest().finish()
         )
     }
-    let mut resp = crate::util::async_reqwest_to_error(state.apple_pay_client.post(&data.url)
+    let resp = crate::util::async_reqwest_to_error(state.apple_pay_client.post(&data.url)
         .json(&MerchantVerificationPostData {
             merchant_identifier: "merchant.uk.cardifftec".to_string(),
             display_name: "We Will Fix Your PC".to_string(),
@@ -39,7 +37,7 @@ pub async fn merchant_verification(req: HttpRequest, state: web::Data<crate::con
             }.to_string().replace("https://", "").replace("http://", ""),
         })).await?;
 
-    let data = resp.json().compat().await?;
+    let data = resp.json().await?;
 
     Ok(
         HttpResponse::Ok().json(&MerchantVerificationResponseData {

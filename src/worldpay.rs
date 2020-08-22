@@ -1,7 +1,6 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::prelude::*;
 use crypto::mac::Mac;
-use futures::compat::Future01CompatExt;
 use encoding::types::Encoding;
 
 use crate::db;
@@ -277,14 +276,14 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
 
     let token = data.oauth.clone().get_access_token().await?;
 
-    let payment = match match data.db.send(db::GetPayment::new(&info)).compat().await {
+    let payment = match match data.db.send(db::GetPayment::new(&info)).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
         Ok(r) => r,
         Err(e) => match (e, payment_data.payment.as_ref()) {
             (diesel::result::Error::NotFound, Some(payment)) => {
-                let tokens = match match data.db.send(db::GetPaymentTokens::new()).compat().await {
+                let tokens = match match data.db.send(db::GetPaymentTokens::new()).await {
                     Ok(r) => r,
                     Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
                 } {
@@ -359,7 +358,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
                     &items,
                 );
 
-                match match data.db.send(payment).compat().await {
+                match match data.db.send(payment).await {
                     Ok(r) => r,
                     Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
                 } {
@@ -372,7 +371,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
         }
     };
 
-    let items = match match data.db.send(db::GetPaymentItems::new(&payment)).compat().await {
+    let items = match match data.db.send(db::GetPaymentItems::new(&payment)).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -442,7 +441,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
         payment_data.card.exp_month,
         payment_data.card.exp_year,
         &payment_data.card.name,
-    )).compat().await {
+    )).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -455,12 +454,12 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
         models::PaymentEnvironment::TEST => &data.worldpay.test_key,
     };
 
-    let mut c = util::async_reqwest_to_error(
-        reqwest::r#async::Client::new().post("https://api.worldpay.com/v1/orders")
+    let c = util::async_reqwest_to_error(
+        reqwest::Client::new().post("https://api.worldpay.com/v1/orders")
             .header(reqwest::header::AUTHORIZATION, worldpay_token)
             .json(&order_data)
     ).await?;
-    let r = match c.json::<WorldpayOrderResp>().compat().await {
+    let r = match c.json::<WorldpayOrderResp>().await {
         Ok(c) => c,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     };
@@ -471,7 +470,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
                 &payment.id,
                 models::PaymentState::PAID,
                 Some(&format!("{} {}", r.payment_response.card_issuer, r.payment_response.masked_card_number)),
-            )).compat().await {
+            )).await {
                 Ok(r) => r,
                 Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
             } {
@@ -496,7 +495,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
                 &r.one_time_3ds_token.unwrap(),
                 &r.redirect_url.unwrap(),
                 &r.order_code,
-            )).compat().await {
+            )).await {
                 Ok(r) => r,
                 Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
             } {
@@ -521,7 +520,7 @@ pub async fn process_worldpay_payment(req: HttpRequest, data: web::Data<crate::c
 }
 
 pub async fn render_3ds_form<'a>(req: HttpRequest, data: web::Data<crate::config::AppState>, info: web::Path<uuid::Uuid>) -> actix_web::Result<impl actix_web::Responder> {
-    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -532,7 +531,7 @@ pub async fn render_3ds_form<'a>(req: HttpRequest, data: web::Data<crate::config
         }
     };
 
-    let threeds_data = match match data.db.send(db::GetThreedsData::new(&payment)).compat().await {
+    let threeds_data = match match data.db.send(db::GetThreedsData::new(&payment)).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -573,7 +572,7 @@ pub async fn render_3ds_complete<'a>(req: HttpRequest, data: web::Data<crate::co
         None => "".to_string()
     };
 
-    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).compat().await {
+    let payment = match match data.db.send(db::GetPayment::new(&info.into_inner())).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -583,7 +582,7 @@ pub async fn render_3ds_complete<'a>(req: HttpRequest, data: web::Data<crate::co
             _ => Err(actix_web::error::ErrorInternalServerError(e))
         }
     };
-    match match data.db.send(db::DeleteThreedsData::new(&payment)).compat().await {
+    match match data.db.send(db::DeleteThreedsData::new(&payment)).await {
         Ok(r) => r,
         Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
     } {
@@ -613,18 +612,18 @@ pub async fn render_3ds_complete<'a>(req: HttpRequest, data: web::Data<crate::co
 
     match {
         match util::async_reqwest_to_error(
-            reqwest::r#async::Client::new().put(reqwest::Url::parse(&format!("https://api.worldpay.com/v1/orders/{}", form.order_id)).unwrap())
+            reqwest::Client::new().put(reqwest::Url::parse(&format!("https://api.worldpay.com/v1/orders/{}", form.order_id)).unwrap())
                 .header(reqwest::header::AUTHORIZATION, worldpay_token)
                 .json(&order_data)
         ).await {
-            Ok(mut c) => match c.json::<WorldpayOrderResp>().compat().await {
+            Ok(c) => match c.json::<WorldpayOrderResp>().await {
                 Ok(r) => match r.payment_status {
                     WorldpayOrderStatus::Success | WorldpayOrderStatus::Authorized => {
                         match data.db.send(db::UpdatePaymentState::new(
                             &payment.id,
                             models::PaymentState::PAID,
                             Some(&format!("{} {}", r.payment_response.card_issuer, r.payment_response.masked_card_number)),
-                        )).compat().await {
+                        )).await {
                             Ok(r) => match r {
                                 Ok(_) => {
                                     let job = jobs::CompletePayment::new(&payment.id);

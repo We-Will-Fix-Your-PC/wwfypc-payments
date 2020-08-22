@@ -1,0 +1,9 @@
+target
+secrets
+react/payments_form/node_modules
+Dockerfile
+.idea
+.env
+.gitignore
+build.sh
+kubes

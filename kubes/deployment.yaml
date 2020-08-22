@@ -1,0 +1,104 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: app-conf
+  namespace: payment
+data:
+  REDIS_URL: "redis.payment.svc.cluster.local:6379"
+  SMTP_SERVER: "mail.misell.cymru"
+  KEYCLOAK_REALM: wwfypc
+  CLIENT_ID: "payments-server"
+  OAUTH_WELL_KNOWN: "https://account.cardifftec.uk/auth/realms/wwfypc/.well-known/openid-configuration"
+  APPLE_PAY_IDENTITY: "/apple-pay/apple-pay-web.pfx"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: payment
+  labels:
+    app: payment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment
+  template:
+    metadata:
+      labels:
+        app: payment
+    spec:
+      volumes:
+        - name: apple-pay-identity
+          secret:
+            secretName: apple-pay-identity
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      containers:
+        - name: app
+          image: theenbyperor/wwfypc-payments:725544ad97c35e32647e288c90b4b5bf0d53a5e0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - mountPath: "/apple-pay"
+              name: apple-pay-identity
+          env:
+            - name: SSL_CERT_DIR
+              value: "/etc/ssl/certs"
+            - name: RUST_LOG
+              value: debug
+          envFrom:
+            - configMapRef:
+                name: app-conf
+            - secretRef:
+                name: db-creds
+            - secretRef:
+                name: worldpay-creds
+            - secretRef:
+                name: cookie-secret
+            - secretRef:
+                name: mail-creds
+            - secretRef:
+                name: keycloak
+            - secretRef:
+                name: rabbitmq-user
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: payment
+  name: app
+  labels:
+    app: payment
+spec:
+  selector:
+    app: payment
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: app
+---
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: app-ingress
+  namespace: payment
+  annotations:
+    certmanager.k8s.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  tls:
+    - hosts:
+        - payments.cardifftec.uk
+      secretName: app-tls
+  rules:
+    - host: payments.cardifftec.uk
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: app
+              servicePort: 3000

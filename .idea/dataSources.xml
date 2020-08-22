@@ -7,5 +7,11 @@
       <jdbc-driver>org.postgresql.Driver</jdbc-driver>
       <jdbc-url>jdbc:postgresql://localhost/wwfypc_payments</jdbc-url>
     </data-source>
+    <data-source source="LOCAL" name="payment@localhost" uuid="a0af9c83-9dd1-412e-b7e4-513ad5666706">
+      <driver-ref>postgresql</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.postgresql.Driver</jdbc-driver>
+      <jdbc-url>jdbc:postgresql://localhost:5433/payment</jdbc-url>
+    </data-source>
   </component>
 </project>

@@ -96,7 +96,7 @@ pub fn amqp_client() -> amqp::Channel {
     channel
 }
 
-pub fn apple_pay_identity() -> reqwest::r#async::Client {
+pub fn apple_pay_identity() -> reqwest::Client {
     dotenv().ok();
     let cert_path = env::var("APPLE_PAY_IDENTITY")
         .expect("APPLE_PAY_IDENTITY must be set");
@@ -108,7 +108,7 @@ pub fn apple_pay_identity() -> reqwest::r#async::Client {
 
     let identity = reqwest::Identity::from_pkcs12_der(&buf, "").expect("Unable to decode apple pay identity certificate");
 
-    reqwest::r#async::ClientBuilder::new()
+    reqwest::ClientBuilder::new()
         .identity(identity)
         .build()
         .expect("Unable to create apple pay client")
@@ -125,7 +125,7 @@ pub struct AppState {
     pub oauth: crate::oauth::OAuthClient,
     pub keycloak: crate::keycloak::KeycloakClient,
     pub worldpay: WorldpayConfig,
-    pub apple_pay_client: reqwest::r#async::Client,
+    pub apple_pay_client: reqwest::Client,
     pub db: Addr<crate::db::DbExecutor>,
     pub jobs_state: crate::jobs::JobsState,
 }
