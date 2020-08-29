@@ -7,6 +7,8 @@ VERSION=$(sentry-cli releases propose-version || exit)
 
 cd react/payments_form || exit
 yarn webpack --config webpack.prod.js || exit
+cd ../admin_portal
+yarn webpack --config webpack.prod.js || exit
 cd ../..
 
 docker build -t "theenbyperor/wwfypc-payments:$VERSION" . || exit

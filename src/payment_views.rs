@@ -125,7 +125,11 @@ pub async fn get_payment<'a>(token: crate::oauth::OptionalBearerAuthToken, data:
         };
 
         if payment.customer_id != user_id {
-            return Err(actix_web::error::ErrorForbidden(""))
+            let (_token_introspect, oauth_token) = match crate::util::user_token_from_session(&session, &data.oauth).await? {
+                Some(u) => u,
+                None => return Err(actix_web::error::ErrorForbidden(""))
+            };
+            data.oauth.verify_token(&oauth_token.access_token, "view-payments").await?;
         }
     }
     let items = match match data.db.send(db::GetPaymentItems::new(&payment)).await {
@@ -163,6 +167,49 @@ pub async fn get_payment<'a>(token: crate::oauth::OptionalBearerAuthToken, data:
             })
             .collect(),
     };
+
+    Ok(HttpResponse::Ok().json(response_data))
+}
+
+#[derive(Deserialize)]
+pub struct GetPaymentsRequest {
+   limit: Option<i64>,
+   offset: Option<i64>,
+}
+
+pub async fn get_payments<'a>(data: web::Data<crate::config::AppState>, session: actix_session::Session, query_data: web::Query<GetPaymentsRequest>) -> actix_web::Result<impl actix_web::Responder> {
+    let (_token_introspect, oauth_token) = match crate::util::user_token_from_session(&session, &data.oauth).await? {
+        Some(u) => u,
+        None => return Err(actix_web::error::ErrorForbidden(""))
+    };
+
+    data.oauth.verify_token(&oauth_token.access_token, "view-payments").await?;
+
+    let payments = match match data.db.send(db::GetPayments::new(query_data.offset, query_data.limit)).await {
+        Ok(p) => p,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    } {
+        Ok(p) => p,
+        Err(e) => return Err(actix_web::error::ErrorInternalServerError(e))
+    };
+
+    let response_data = payments.into_iter().map(|payment| {
+        PaymentResponseData {
+            id: payment.id,
+            timestamp: DateTime::<Utc>::from_utc(payment.time, Utc),
+            state: payment.state,
+            environment: payment.environment,
+            payment_method: payment.payment_method,
+            customer: PaymentCustomerResponseData {
+                id: payment.customer_id,
+                request_name: false,
+                email: None,
+                request_email: false,
+                request_phone: false,
+            },
+            items: vec![]
+        }
+    }).collect::<Vec<_>>();
 
     Ok(HttpResponse::Ok().json(response_data))
 }

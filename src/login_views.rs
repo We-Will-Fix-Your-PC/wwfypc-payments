@@ -116,3 +116,16 @@ pub async fn login_callback(data: web::Data<crate::config::AppState>, info: web:
     }
     Ok(resp.finish())
 }
+
+#[derive(Clone, Debug, Serialize)]
+struct WhoamiResponseData {
+    user: Option<uuid::Uuid>,
+}
+
+pub async fn whoami(data: web::Data<crate::config::AppState>, session: actix_session::Session) -> actix_web::Result<impl actix_web::Responder> {
+    let user_id = crate::util::user_id_from_session(&session, &data.oauth).await?;
+
+    Ok(HttpResponse::Ok().json(WhoamiResponseData {
+        user: user_id
+    }))
+}

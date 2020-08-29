@@ -37,6 +37,7 @@ pub mod apple_pay;
 pub mod config;
 pub mod login_views;
 pub mod payment_views;
+pub mod admin_views;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
@@ -117,6 +118,13 @@ fn main()  {
                 .route("/login/auth/", web::get().to(login_views::start_login))
                 .route("/login/logout/", web::get().to(login_views::start_logout))
                 .route("/login/redirect/", web::get().to(login_views::login_callback))
+                .service(
+                    web::resource("/login/whoami/")
+                        .wrap(Cors::new()
+                            .supports_credentials()
+                            .finish())
+                        .route(web::get().to(login_views::whoami))
+                )
                 .route("/apple-merchant-verification/", web::post().to(apple_pay::merchant_verification))
                 .route("/payment/new/", web::post().to(payment_views::new_payment))
                 .route("/payment/login-complete/", web::get().to(payment_views::render_login_complete))
@@ -128,6 +136,13 @@ fn main()  {
                         .route(web::get().to(payment_views::get_payment))
                 )
                 .service(
+                    web::resource("/payments/")
+                        .wrap(Cors::new()
+                            .supports_credentials()
+                            .finish())
+                        .route(web::get().to(payment_views::get_payments))
+                )
+                .service(
                     web::resource("/payment/worldpay/{payment_id}/")
                         .wrap(Cors::new()
                             .supports_credentials()
@@ -137,6 +152,10 @@ fn main()  {
                 .route("/payment/3ds/{payment_id}/", web::get().to(worldpay::render_3ds_form))
                 .route("/payment/3ds-complete/{payment_id}/", web::post().to(worldpay::render_3ds_complete))
                 .route("/payment/fb/{payment_id}/", web::get().to(payment_views::render_fb_payment))
+                .service(
+                    web::scope("/admin")
+                        .default_service(web::route().to(admin_views::render_admin))
+                )
         });
 
         let mut listenfd = listenfd::ListenFd::from_env();

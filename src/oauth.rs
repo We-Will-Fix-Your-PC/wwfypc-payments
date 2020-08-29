@@ -49,6 +49,7 @@ pub struct OAuthTokenIntrospect {
     pub aud: Option<Vec<String>>,
     pub iss: Option<String>,
     pub jti: Option<String>,
+    pub azp: Option<String>,
     pub realm_access: Option<OAuthTokenIntrospectAccess>,
     pub resource_access: Option<HashMap<String, OAuthTokenIntrospectAccess>>,
 }
@@ -408,10 +409,19 @@ impl OAuthClient {
             return Err(VerifyTokenError::Forbidden);
         }
 
-        match (&i.aud, &i.resource_access) {
-            (Some(aud), Some(resource_access)) => {
+        let is_in_aud = match &i.aud {
+            Some(aud) => aud.contains(&self.config.client_id),
+            None => false
+        };
+        let is_azp = match &i.azp {
+            Some(azp) => azp == &self.config.client_id,
+            None => false
+        };
+
+        match &i.resource_access {
+            Some(resource_access) => {
                 if let Some(r) = role.into() {
-                    if !aud.contains(&self.config.client_id) ||
+                    if !(is_in_aud || is_azp)  ||
                         !resource_access.contains_key(&self.config.client_id) ||
                         !resource_access.get(&self.config.client_id).unwrap().roles.contains(&r.to_owned()) {
                         return Err(VerifyTokenError::Forbidden);

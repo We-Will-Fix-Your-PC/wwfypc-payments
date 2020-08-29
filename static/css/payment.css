@@ -7,6 +7,39 @@ body > img {
   margin: 0 auto;
   display: block; }
 
+.admin > header {
+  align-self: stretch;
+  background: #ff9d4d;
+  padding: 20px 10px;
+  display: flex;
+  align-items: center; }
+  .admin > header h2 {
+    margin: 0;
+    flex-grow: 1; }
+.admin > main {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%; }
+  .admin > main h2 {
+    margin: 0;
+    padding: 10px;
+    background: #eee; }
+  .admin > main .loading {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    flex-grow: 1; }
+  .admin > main table {
+    justify-self: stretch;
+    border-collapse: collapse;
+    margin: 5px;
+    width: calc(100% - 10px); }
+    .admin > main table td, .admin > main table tr, .admin > main table th {
+      border: 1px solid #aaa;
+      padding: 7px 5px; }
+
 .payment {
   display: flex;
   flex-direction: column;
@@ -45,11 +78,18 @@ body > img {
     margin: 10px 0; }
     .payment button:hover {
       background-color: #cc5c00; }
+    .payment button:disabled {
+      background-color: #aaa;
+      color: #cc5c00; }
   .payment .buttons {
     display: flex;
     flex-direction: column;
     justify-content: center;
     align-items: center; }
+    .payment .buttons.sideways {
+      flex-direction: row; }
+      .payment .buttons.sideways button {
+        margin: 10px; }
     .payment .buttons img {
       cursor: pointer; }
     .payment .buttons > div {

@@ -46,6 +46,42 @@ impl Handler<GetPayment> for DbExecutor {
     }
 }
 
+pub struct GetPayments {
+    offset: Option<i64>,
+    limit: Option<i64>,
+}
+
+impl GetPayments {
+    pub fn new<I: Into<Option<i64>>>(offset: I, limit: I) -> Self {
+        Self {
+            offset: offset.into(),
+            limit: limit.into()
+        }
+    }
+}
+
+impl Message for GetPayments {
+    type Result = Result<Vec<models::Payment>, diesel::result::Error>;
+}
+
+impl Handler<GetPayments> for DbExecutor {
+    type Result = Result<Vec<models::Payment>, diesel::result::Error>;
+
+    fn handle(&mut self, msg: GetPayments, _: &mut Self::Context) -> Self::Result {
+        use schema::payments::dsl::*;
+
+        let mut dsl = payments.order(time.desc()).offset(0);
+        if let Some(offset) = msg.offset {
+            dsl = dsl.offset(offset);
+        }
+        let mut dsl = dsl.limit(100);
+        if let Some(limit) = msg.limit {
+            dsl = dsl.limit(limit);
+        }
+        dsl.load::<models::Payment>(&self.0)
+    }
+}
+
 pub struct GetPaymentItems {
     payment: models::Payment,
 }

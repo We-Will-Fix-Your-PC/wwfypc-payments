@@ -14,6 +14,52 @@ body {
   }
 }
 
+.admin {
+  > header {
+    align-self: stretch;
+    background: lighten($orange, 15%);
+    padding: 20px 10px;
+    display: flex;
+    align-items: center;
+
+    h2 {
+      margin: 0;
+      flex-grow: 1;
+    }
+  }
+  > main {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+
+    h2 {
+      margin: 0;
+      padding: 10px;
+      background: #eee;
+    }
+
+    .loading {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      flex-grow: 1;
+    }
+
+    table {
+      justify-self: stretch;
+      border-collapse: collapse;
+      margin: 5px;
+      width: calc(100% - 10px);
+      td, tr, th {
+        border: 1px solid #aaa;
+        padding: 7px 5px;
+      }
+    }
+  }
+}
+
 .payment {
   display: flex;
   flex-direction: column;
@@ -67,6 +113,11 @@ body {
     &:hover {
       background-color: darken($orange, 10%);
     }
+
+    &:disabled {
+      background-color: #aaa;
+      color: darken($orange, 10%);
+    }
   }
 
   .buttons {
@@ -74,6 +125,14 @@ body {
     flex-direction: column;
     justify-content: center;
     align-items: center;
+
+    &.sideways {
+      flex-direction: row;
+
+      button {
+        margin: 10px;
+      }
+    }
 
     img {
       cursor: pointer;

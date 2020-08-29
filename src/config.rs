@@ -71,7 +71,7 @@ pub fn mail_client() -> lettre::smtp::SmtpClient {
     dotenv().ok();
 
     let server = env::var("SMTP_SERVER")
-        .unwrap_or("mail.misell.cymru".to_string());
+        .unwrap_or("mx.postal.as207960.net".to_string());
     let username = env::var("SMTP_USERNAME")
         .expect("SMTP_USERNAME must be set");
     let password = env::var("SMTP_PASSWORD")
