@@ -5,7 +5,7 @@ metadata:
   namespace: payment
 data:
   REDIS_URL: "redis.payment.svc.cluster.local:6379"
-  SMTP_SERVER: "mail.misell.cymru"
+  SMTP_SERVER: "mx.postal.as207960.net"
   KEYCLOAK_REALM: wwfypc
   CLIENT_ID: "payments-server"
   OAUTH_WELL_KNOWN: "https://account.cardifftec.uk/auth/realms/wwfypc/.well-known/openid-configuration"
@@ -38,7 +38,7 @@ spec:
             value: "1"
       containers:
         - name: app
-          image: theenbyperor/wwfypc-payments:725544ad97c35e32647e288c90b4b5bf0d53a5e0
+          image: theenbyperor/wwfypc-payments:4a6a302aa7ba50a5f63c20d265c0a86458a03c8b
           imagePullPolicy: Always
           ports:
             - containerPort: 3000

@@ -77,7 +77,11 @@ pub fn mail_client() -> lettre::smtp::SmtpClient {
     let password = env::var("SMTP_PASSWORD")
         .expect("SMTP_PASSWORD must be set");
 
-    lettre::smtp::SmtpClient::new_simple(&server)
+    let connector = native_tls::TlsConnector::new().unwrap();
+
+    lettre::smtp::SmtpClient::new((server.as_str(), 25), lettre::smtp::ClientSecurity::Opportunistic(
+        lettre::smtp::client::net::ClientTlsParameters::new(server.clone(), connector)
+    ))
         .unwrap()
         .hello_name(lettre::smtp::extension::ClientId::Domain("payments.cardifftec.uk".to_string()))
         .connection_reuse(lettre::smtp::ConnectionReuseParameters::ReuseUnlimited)

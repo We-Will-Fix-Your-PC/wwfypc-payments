@@ -55,6 +55,7 @@ openssl-probe = "0.1"
 url = "2"
 futures-util = "0.3.4"
 futures-macro = "0.3.4"
+native-tls = "0.2.4"
 
 [build-dependencies]
 actix-web-static-files = "2"
